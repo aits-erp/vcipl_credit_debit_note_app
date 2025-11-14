@@ -1,7 +1,5 @@
 # Copyright (c) 2025, aits and contributors
 # For license information, please see license.txt
-
-
 import frappe
 from frappe import _, msgprint, throw
 from frappe.contacts.doctype.address.address import get_address_display
@@ -1055,11 +1053,10 @@ class CreditNote(SellingController):
 
 		self.make_item_gl_entries(gl_entries)
 		self.make_precision_loss_gl_entry(gl_entries)
+		#commented these lines for submit issue resolving
 		#self.make_discount_gl_entries(gl_entries)
 
 		gl_entries = make_regional_gl_entries(gl_entries, self)
-
-		# merge gl entries before adding pos entries
 		gl_entries = merge_similar_entries(gl_entries)
 
 		self.make_loyalty_point_redemption_gle(gl_entries)
@@ -2618,9 +2615,6 @@ def create_dunning(source_name, target_doc=None, ignore_permissions=False):
 
 
 def check_if_return_invoice_linked_with_payment_entry(self):
-	# If a Return invoice is linked with payment entry along with other invoices,
-	# the cancellation of the Return causes allocated amount to be greater than paid
-
 	if not frappe.db.get_single_value("Accounts Settings", "unlink_payment_on_cancellation_of_invoice"):
 		return
 

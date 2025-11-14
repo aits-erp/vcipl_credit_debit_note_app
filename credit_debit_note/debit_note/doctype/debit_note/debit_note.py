@@ -288,9 +288,6 @@ class DebitNote(BuyingController):
 				warehouse_account = get_warehouse_account_map(self.company)
 
 		for item in self.get("items"):
-			# in case of auto inventory accounting,
-			# expense account is always "Stock Received But Not Billed" for a stock item
-			# except opening entry, drop-ship entry and fixed asset items
 			if (
 				auto_accounting_for_stock
 				and item.item_code in stock_items
@@ -717,8 +714,6 @@ class DebitNote(BuyingController):
 		return 0
 
 	def make_supplier_gl_entry(self, gl_entries):
-		# Checked both rounding_adjustment and rounded_total
-		# because rounded_total had value even before introduction of posting GLE based on rounded total
 		grand_total = (
 			self.rounded_total if (self.rounding_adjustment and self.rounded_total) else self.grand_total
 		)
