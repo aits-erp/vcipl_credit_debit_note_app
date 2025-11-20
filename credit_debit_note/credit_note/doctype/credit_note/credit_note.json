@@ -213,7 +213,11 @@
   "is_discounted",
   "remarks",
   "connections_tab",
-  "amended_from"
+  "debit_to",
+  "taxes_and_charges_added",
+  "taxes_and_charges_deducted",
+  "base_taxes_and_charges_added",
+  "base_taxes_and_charges_deducted"
  ],
  "fields": [
   {
@@ -397,15 +401,15 @@
    "default": "1",
    "fieldname": "is_return",
    "fieldtype": "Check",
-   "label": "Is Return (Credit Note)",
    "hide_days": 1,
    "hide_seconds": 1,
+   "label": "Is Return (Credit Note)",
    "no_copy": 1,
    "print_hide": 1,
    "read_only": 1
-},
+  },
   {
-    "depends_on": "eval:doc.is_return",
+   "depends_on": "eval:doc.is_return",
    "fieldname": "return_against",
    "fieldtype": "Link",
    "hide_days": 1,
@@ -645,7 +649,7 @@
    "label": "Items",
    "oldfieldname": "entries",
    "oldfieldtype": "Table",
-   "options": "Sales Invoice Item",
+   "options": "Credit Note Item",
    "reqd": 1
   },
   {
@@ -801,7 +805,7 @@
    "label": "Sales Taxes and Charges",
    "oldfieldname": "other_charges",
    "oldfieldtype": "Table",
-   "options": "Sales Taxes and Charges"
+   "options": "Credit Note Taxes and Charges"
   },
   {
    "fieldname": "section_break_43",
@@ -810,13 +814,12 @@
    "hide_seconds": 1
   },
   {
-    "fieldname": "base_total_taxes_and_charges",
-    "label": "Base Total Taxes and Charges",
-    "fieldtype": "Currency",
-    "read_only": 1,
-    "print_hide": 1
-},
-
+   "fieldname": "base_total_taxes_and_charges",
+   "fieldtype": "Currency",
+   "label": "Base Total Taxes and Charges",
+   "print_hide": 1,
+   "read_only": 1
+  },
   {
    "fieldname": "column_break_47",
    "fieldtype": "Column Break",
@@ -1770,11 +1773,11 @@
    "print_hide": 1
   },
   {
-    "fieldname": "debit_to",
-    "label": "Debit To",
-    "fieldtype": "Link",
-    "options": "Account"
-},
+   "fieldname": "debit_to",
+   "fieldtype": "Link",
+   "label": "Debit To",
+   "options": "Account"
+  },
   {
    "fieldname": "party_account_currency",
    "fieldtype": "Link",
@@ -1787,13 +1790,6 @@
    "print_hide": 1,
    "read_only": 1
   },
-  {
-    "fieldname": "party_account_currency",
-    "label": "Party Account Currency",
-    "fieldtype": "Data",
-    "read_only": 1,
-    "hidden": 1
-},
   {
    "allow_on_submit": 1,
    "default": "No",
@@ -1870,36 +1866,33 @@
    "read_only": 1
   },
   {
-    "fieldname": "taxes_and_charges_added",
-    "label": "Total Taxes and Charges (Added)",
-    "fieldtype": "Currency",
-    "read_only": 1,
-    "print_hide": 1
-},
-{
-    "fieldname": "taxes_and_charges_deducted",
-    "label": "Total Taxes and Charges (Deducted)",
-    "fieldtype": "Currency",
-    "read_only": 1,
-    "print_hide": 1
-},
-{
-    "fieldname": "base_taxes_and_charges_added",
-    "label": "Base Taxes and Charges (Added)",
-    "fieldtype": "Currency",
-    "read_only": 1,
-    "print_hide": 1
-},
-{
-    "fieldname": "base_taxes_and_charges_deducted",
-    "label": "Base Taxes and Charges (Deducted)",
-    "fieldtype": "Currency",
-    "read_only": 1,
-    "print_hide": 1
-},
-
-
-
+   "fieldname": "taxes_and_charges_added",
+   "fieldtype": "Currency",
+   "label": "Total Taxes and Charges (Added)",
+   "print_hide": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "taxes_and_charges_deducted",
+   "fieldtype": "Currency",
+   "label": "Total Taxes and Charges (Deducted)",
+   "print_hide": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "base_taxes_and_charges_added",
+   "fieldtype": "Currency",
+   "label": "Base Taxes and Charges (Added)",
+   "print_hide": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "base_taxes_and_charges_deducted",
+   "fieldtype": "Currency",
+   "label": "Base Taxes and Charges (Deducted)",
+   "print_hide": 1,
+   "read_only": 1
+  },
   {
    "fieldname": "column_break10",
    "fieldtype": "Column Break",
@@ -2194,16 +2187,6 @@
    "fieldtype": "Tab Break",
    "label": "Connections",
    "show_dashboard": 1
-  },
-  {
-   "fieldname": "amended_from",
-   "fieldtype": "Link",
-   "label": "Amended From",
-   "no_copy": 1,
-   "options": "Credit Note",
-   "print_hide": 1,
-   "read_only": 1,
-   "search_index": 1
   }
  ],
  "grid_page_length": 50,
@@ -2216,7 +2199,7 @@
    "link_fieldname": "consolidated_invoice"
   }
  ],
- "modified": "2025-11-13 10:49:13.335004",
+ "modified": "2025-11-20 15:36:04.005755",
  "modified_by": "Administrator",
  "module": "credit_note",
  "name": "Credit Note",
