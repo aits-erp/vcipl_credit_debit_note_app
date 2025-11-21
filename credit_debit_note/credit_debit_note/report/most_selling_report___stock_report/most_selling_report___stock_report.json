@@ -1,0 +1,28 @@
+{
+  "report_type": "Script Report",
+  "name": "Most Selling Report - Stock report",
+  "is_standard": "Yes",
+  "module": "reportcustom",
+  "script": "reportcustom.report.top_100_most_selling_item__stock_report.top_100_most_selling_item__stock_report",
+  "filters": [
+    {
+      "fieldname": "limit",
+      "label": "Limit",
+      "fieldtype": "Int",
+      "default": 100
+    },
+    {
+      "fieldname": "item_group",
+      "label": "Item Group",
+      "fieldtype": "Link",
+      "options": "Item Group"
+    },
+    {
+      "fieldname": "sort_by",
+      "label": "Sort By",
+      "fieldtype": "Select",
+      "options": "\nQuantity\nAmount",
+      "default": "Amonunt"
+    }
+  ]
+}
