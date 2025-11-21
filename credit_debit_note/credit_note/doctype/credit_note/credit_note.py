@@ -1074,6 +1074,7 @@ class CreditNote(SellingController):
 		grand_total = (
 			self.rounded_total if (self.rounding_adjustment and self.rounded_total) else self.grand_total
 		)
+
 		base_grand_total = flt(
 			self.base_rounded_total
 			if (self.base_rounding_adjustment and self.base_rounded_total)
@@ -1082,11 +1083,47 @@ class CreditNote(SellingController):
 		)
 
 		if grand_total and not self.is_internal_transfer():
+
 			against_voucher = self.name
 			if self.is_return and self.return_against and not self.update_outstanding_for_self:
 				against_voucher = self.return_against
 
-			# Did not use base_grand_total to book rounding loss gle
+			# ---------------------------
+			# 🔥 SIGN CORRECTION FOR CREDIT NOTE
+			# ---------------------------
+			if self.is_return:
+				# Credit Note → CREDIT customer
+				debit = 0
+				credit = base_grand_total
+
+				# account currency handling
+				if self.party_account_currency == self.company_currency:
+					debit_acc = 0
+					credit_acc = base_grand_total
+				else:
+					debit_acc = 0
+					credit_acc = grand_total
+
+				debit_tr = 0
+				credit_tr = grand_total
+
+			else:
+				# Normal Sales Invoice → DEBIT customer
+				debit = base_grand_total
+				credit = 0
+
+				if self.party_account_currency == self.company_currency:
+					debit_acc = base_grand_total
+					credit_acc = 0
+				else:
+					debit_acc = grand_total
+					credit_acc = 0
+
+				debit_tr = grand_total
+				credit_tr = 0
+			# ---------------------------
+			# POST CUSTOMER GL ENTRY
+			# ---------------------------
 			gl_entries.append(
 				self.get_gl_dict(
 					{
@@ -1095,11 +1132,16 @@ class CreditNote(SellingController):
 						"party": self.customer,
 						"due_date": self.due_date,
 						"against": self.against_income_account,
-						"debit": base_grand_total,
-						"debit_in_account_currency": base_grand_total
-						if self.party_account_currency == self.company_currency
-						else grand_total,
-						"debit_in_transaction_currency": grand_total,
+
+						"debit": debit,
+						"credit": credit,
+
+						"debit_in_account_currency": debit_acc,
+						"credit_in_account_currency": credit_acc,
+
+						"debit_in_transaction_currency": debit_tr,
+						"credit_in_transaction_currency": credit_tr,
+
 						"against_voucher": against_voucher,
 						"against_voucher_type": self.doctype,
 						"cost_center": self.cost_center,
@@ -1118,28 +1160,70 @@ class CreditNote(SellingController):
 		for tax in self.get("taxes"):
 			amount, base_amount = self.get_tax_amounts(tax, enable_discount_accounting)
 
-			if flt(tax.base_tax_amount_after_discount_amount):
-				account_currency = get_account_currency(tax.account_head)
-				gl_entries.append(
-					self.get_gl_dict(
-						{
-							"account": tax.account_head,
-							"against": self.customer,
-							"credit": flt(base_amount, tax.precision("tax_amount_after_discount_amount")),
-							"credit_in_account_currency": (
-								flt(base_amount, tax.precision("base_tax_amount_after_discount_amount"))
-								if account_currency == self.company_currency
-								else flt(amount, tax.precision("tax_amount_after_discount_amount"))
-							),
-							"credit_in_transaction_currency": flt(
-								amount, tax.precision("tax_amount_after_discount_amount")
-							),
-							"cost_center": tax.cost_center,
-						},
-						account_currency,
-						item=tax,
-					)
+			# If zero tax, skip
+			if not flt(tax.base_tax_amount_after_discount_amount):
+				continue
+
+			account_currency = get_account_currency(tax.account_head)
+
+			# --------------------------
+			# 🔥 Correcting TAX GL for Credit Note
+			# --------------------------
+			if self.is_return:
+				# Credit Note → tax must be DEBIT
+				debit = flt(base_amount, tax.precision("tax_amount_after_discount_amount"))
+				credit = 0
+
+				debit_acc = (
+					flt(base_amount, tax.precision("base_tax_amount_after_discount_amount"))
+					if account_currency == self.company_currency
+					else flt(amount, tax.precision("tax_amount_after_discount_amount"))
 				)
+
+				credit_acc = 0
+
+				debit_tr = flt(amount, tax.precision("tax_amount_after_discount_amount"))
+				credit_tr = 0
+
+			else:
+				# Normal Sales Invoice → tax is CREDIT
+				debit = 0
+				credit = flt(base_amount, tax.precision("tax_amount_after_discount_amount"))
+
+				debit_acc = 0
+				credit_acc = (
+					flt(base_amount, tax.precision("base_tax_amount_after_discount_amount"))
+					if account_currency == self.company_currency
+					else flt(amount, tax.precision("tax_amount_after_discount_amount"))
+				)
+
+				debit_tr = 0
+				credit_tr = flt(amount, tax.precision("tax_amount_after_discount_amount"))
+
+			# --------------------------
+			# POST THE TAX GLE
+			# --------------------------
+			gl_entries.append(
+				self.get_gl_dict(
+					{
+						"account": tax.account_head,
+						"against": self.customer,
+
+						"debit": debit,
+						"credit": credit,
+
+						"debit_in_account_currency": debit_acc,
+						"credit_in_account_currency": credit_acc,
+
+						"debit_in_transaction_currency": debit_tr,
+						"credit_in_transaction_currency": credit_tr,
+
+						"cost_center": tax.cost_center,
+					},
+					account_currency,
+					item=tax,
+				)
+			)
 
 	def make_internal_transfer_gl_entries(self, gl_entries):
 		if self.is_internal_transfer() and flt(self.base_total_taxes_and_charges):
