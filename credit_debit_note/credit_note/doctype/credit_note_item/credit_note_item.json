@@ -1,8 +1,9 @@
 {
+ "name": "Credit Note Item",
+ "doctype": "DocType",
  "actions": [],
  "autoname": "hash",
  "creation": "2025-11-13 14:24:58.343256",
- "doctype": "DocType",
  "document_type": "Document",
  "editable_grid": 1,
  "engine": "InnoDB",
@@ -985,7 +986,6 @@
  "modified": "2025-11-13 14:24:58.343256",
  "modified_by": "Administrator",
  "module": "credit_note",
- "name": "Credit Note Item",
  "naming_rule": "Random",
  "owner": "Administrator",
  "permissions": [],

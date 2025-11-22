@@ -20,7 +20,6 @@ from erpnext.accounts.doctype.repost_accounting_ledger.repost_accounting_ledger 
 from erpnext.accounts.doctype.tax_withholding_category.tax_withholding_category import (
 	get_party_tax_withholding_details,
 )
-from erpnext.accounts.general_ledger import get_round_off_account_and_cost_center
 from erpnext.accounts.party import get_due_date, get_party_account, get_party_details
 from erpnext.accounts.utils import (
 	cancel_exchange_gain_loss_journal,
@@ -1041,32 +1040,183 @@ class CreditNote(SellingController):
 		elif self.docstatus == 2 and cint(self.update_stock) and cint(auto_accounting_for_stock):
 			make_reverse_gl_entries(voucher_type=self.doctype, voucher_no=self.name)
 
-	def get_gl_entries(self, warehouse_account=None):
-		from erpnext.accounts.general_ledger import merge_similar_entries
+	def get_gl_entries(self):
+		import frappe
+		from frappe.utils import flt, nowdate
 
 		gl_entries = []
 
-		self.make_customer_gl_entry(gl_entries)
+		# Helper: Resolve tax amount safely (base first, fallback to tax_amount)
+		def get_tax_amount(tax):
+			amt = flt(getattr(tax, "base_tax_amount", 0))
+			if flt(amt) == 0:
+				amt = flt(getattr(tax, "tax_amount", 0))
+			return flt(amt)
 
-		self.make_tax_gl_entries(gl_entries)
-		self.make_internal_transfer_gl_entries(gl_entries)
+		# ------------------------------------------
+		# 1) ITEM REVERSAL (DEBIT Sales / Income Account)
+		# ------------------------------------------
+		total_item_amount = flt(
+			sum(flt(item.get("base_amount") or (flt(item.get("qty")) * flt(item.get("base_rate")))) for item in getattr(self, "items", []) or [])
+		)
 
-		self.make_item_gl_entries(gl_entries)
-		self.make_precision_loss_gl_entry(gl_entries)
-		#commented these lines for submit issue resolving
-		#self.make_discount_gl_entries(gl_entries)
+		if total_item_amount:
+			income_account = None
 
-		gl_entries = make_regional_gl_entries(gl_entries, self)
-		gl_entries = merge_similar_entries(gl_entries)
+			# priority 1: take from first item row (this is how Sales Invoice works)
+			if self.items and self.items[0].get("income_account"):
+				income_account = self.items[0].get("income_account")
 
-		self.make_loyalty_point_redemption_gle(gl_entries)
-		self.make_pos_gl_entries(gl_entries)
+			# fallback: company default
+			if not income_account:
+				income_account = frappe.db.get_value("Company", self.company, "default_income_account")
 
-		self.make_write_off_gl_entry(gl_entries)
-		self.make_gle_for_rounding_adjustment(gl_entries)
+			if not income_account:
+				frappe.throw("No Income Account found for Credit Note.")
 
-		self.set_transaction_currency_and_rate_in_gl_map(gl_entries)
-		return gl_entries
+
+			gl_entries.append({
+				"account": income_account,
+				"debit": total_item_amount,
+				"credit": 0.0,
+				"party_type": None,
+				"party": None,
+				"against_voucher_type": getattr(self, "return_against_doctype", None),
+				"against_voucher": getattr(self, "return_against", None),
+				"remarks": _("Sales Reversal for Credit Note {0}").format(self.name),
+				"cost_center": (self.items[0].get("cost_center") if self.items and self.items[0].get("cost_center") else None),
+				"project": getattr(self, "project", None),
+			})
+
+		# ------------------------------------------
+		# 2) TAX REVERSAL (DEBIT Tax Accounts)
+		# ------------------------------------------
+		total_tax_amount = 0.0
+		for tax in getattr(self, "taxes", []) or []:
+			amt = get_tax_amount(tax)
+			if abs(amt) == 0:
+				continue
+
+			total_tax_amount += amt
+			tax_account = getattr(tax, "account_head", None) or getattr(tax, "account", None)
+
+			gl_entries.append({
+				"account": tax_account,
+				"debit": amt,
+				"credit": 0.0,
+				"remarks": _("Tax Reversal ({0}) for Credit Note {1}").format(
+					getattr(tax, "description", None) or getattr(tax, "charge_type", None),
+					self.name,
+				),
+				"cost_center": getattr(tax, "cost_center", None),
+			})
+
+		# ------------------------------------------
+		# 3) ROUND-OFF ADJUSTMENT
+		# ------------------------------------------
+		expected_total = flt(total_item_amount) + flt(total_tax_amount)
+		# Use rounded total if present — this is what actually posts to GL
+		actual_total = flt(getattr(self, "base_rounded_total", None) or getattr(self, "base_grand_total", None) or getattr(self, "grand_total", 0))
+		round_difference = flt(expected_total - actual_total)
+
+		if abs(round_difference) > 0.0001:
+			round_off_account = (
+				getattr(self, "round_off_account", None)
+				or frappe.db.get_value("Company", self.company, "round_off_account")
+			)
+
+			if not round_off_account:
+				# use ERPNext default "Round Off" if exists
+				round_off_account = frappe.db.get_value("Account", {"account_name": "Round Off", "company": self.company}, "name")
+
+			if not round_off_account:
+				frappe.throw("Round Off Account is required but not found in Company.")
+
+
+			if round_difference > 0:
+				gl_entries.append({
+					"account": round_off_account,
+					"debit": round_difference,
+					"credit": 0.0,
+					"remarks": _("Round Off Adjustment (Debit) for {0}").format(self.name),
+				})
+			else:
+				gl_entries.append({
+					"account": round_off_account,
+					"debit": 0.0,
+					"credit": abs(round_difference),
+					"remarks": _("Round Off Adjustment (Credit) for {0}").format(self.name),
+				})
+
+		# ------------------------------------------
+		# 4) CUSTOMER COUNTER ENTRY (CREDIT Grand Total)
+		# ------------------------------------------
+		grand_total = flt(getattr(self, "base_rounded_total", None) or getattr(self, "base_grand_total", None) or getattr(self, "grand_total", 0))
+
+		customer_account = (
+			getattr(self, "debit_to", None)
+			or frappe.db.get_value(
+				"Party Account",
+				{"party": self.customer, "party_type": "Customer", "company": self.company},
+				"default_account",
+			)
+			or frappe.db.get_value("Company", self.company, "default_receivable_account")
+		)
+
+		if not customer_account:
+			frappe.throw("Customer Receivable Account is required.")
+
+
+		gl_entries.append({
+			"account": customer_account,
+			"debit": 0.0,
+			"credit": grand_total,
+			"party_type": "Customer",
+			"party": self.customer,
+			"remarks": _("Customer Credit for Credit Note {0}").format(self.name),
+		})
+
+		# ------------------------------------------
+		# Ensure required ERPNext GL fields are present on each entry
+		# and convert to frappe._dict (object-like) which ERPNext expects
+		# ------------------------------------------
+		fiscal_year = frappe.defaults.get_global_default("fiscal_year")
+		posting_date = getattr(self, "posting_date", None) or nowdate()
+
+		normalized = []
+		for e in gl_entries:
+			# ensure mandatory fields exist
+			e.setdefault("company", self.company)
+			e.setdefault("posting_date", posting_date)
+			e.setdefault("voucher_type", self.doctype)
+			e.setdefault("voucher_no", self.name)
+			e.setdefault("fiscal_year", fiscal_year)
+
+			# account currency (optional)
+			try:
+				e.setdefault("account_currency", frappe.db.get_value("Account", e.get("account"), "account_currency"))
+			except Exception:
+				e.setdefault("account_currency", None)
+
+			# party fields safe
+			e.setdefault("party_type", e.get("party_type"))
+			e.setdefault("party", e.get("party"))
+
+			# convert numeric fields to proper floats
+			e["debit"] = flt(e.get("debit", 0.0))
+			e["credit"] = flt(e.get("credit", 0.0))
+
+			# Convert dict to frappe._dict (object-like) and collect
+			normalized.append(frappe._dict(e))
+
+		# ------------------------------------------
+		# DEBUG LOG (inspect in Error Log)
+		# ------------------------------------------
+		frappe.log_error(frappe.as_json(normalized), "GL_ENTRIES_GENERATED_FOR_CREDIT_NOTE_{0}".format(self.name))
+
+		# Return list of frappe._dict objects (ERPNext expects attribute-accessible entries)
+		return normalized
+
 
 	def make_customer_gl_entry(self, gl_entries):
 		# Checked both rounding_adjustment and rounded_total

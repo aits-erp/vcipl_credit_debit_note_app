@@ -1,7 +1,8 @@
 {
+ "name": "Credit Note Taxes and Charges",
+ "doctype": "DocType",
  "actions": [],
  "creation": "2025-11-21 10:28:04.024707",
- "doctype": "DocType",
  "document_type": "Setup",
  "editable_grid": 1,
  "engine": "InnoDB",
@@ -226,7 +227,6 @@
  "modified": "2025-11-21 11:01:41.789188",
  "modified_by": "Administrator",
  "module": "credit_note",
- "name": "Credit Note Taxes and Charges",
  "owner": "Administrator",
  "permissions": [],
  "row_format": "Dynamic",
