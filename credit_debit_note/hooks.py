@@ -5,6 +5,12 @@ app_description = "cn dn"
 app_email = "nikhil@aitsind.com"
 app_license = "mit"
 
+fixtures = [
+    {"doctype": "Custom Field", "filters": [
+        ["dt", "in", ["Credit Note"]]
+    ]},
+]
+
 # Apps
 # ------------------
 
