@@ -1076,27 +1076,17 @@ class CreditNote(SellingController):
 
 
 			gl_entries.append({
-				"account": tax_account,
-				"debit": amt,
+				"account": income_account,
+				"debit": total_item_amount,
 				"credit": 0.0,
-				"remarks": _("Tax Reversal ({0}) for Credit Note {1}").format(
-					getattr(tax, "description", None) or getattr(tax, "charge_type", None),
-					self.name,
-				),
-				"cost_center": getattr(tax, "cost_center", None),
-
-				# -----------------------------
-				# GST FIELDS (india_compliance)
-				# -----------------------------
-				"company_gstin": getattr(self, "company_gstin", None) 
-					or frappe.db.get_value("Company", self.company, "gstin"),
-				"place_of_supply": getattr(self, "place_of_supply", None),
-				"billing_address_gstin": getattr(self, "billing_address_gstin", None),
-				"gst_category": getattr(self, "gst_category", None),
-				"reverse_charge": getattr(self, "reverse_charge", 0),
-				"invoice_type": getattr(self, "invoice_type", None),
+				"party_type": None,
+				"party": None,
+				"against_voucher_type": getattr(self, "return_against_doctype", None),
+				"against_voucher": getattr(self, "return_against", None),
+				"remarks": _("Sales Reversal for Credit Note {0}").format(self.name),
+				"cost_center": (self.items[0].get("cost_center") if self.items and self.items[0].get("cost_center") else None),
+				"project": getattr(self, "project", None),
 			})
-
 
 		# ------------------------------------------
 		# 2) TAX REVERSAL (DEBIT Tax Accounts)
@@ -1119,7 +1109,19 @@ class CreditNote(SellingController):
 					self.name,
 				),
 				"cost_center": getattr(tax, "cost_center", None),
+
+				# -----------------------------
+				# GST FIELDS (india_compliance)
+				# -----------------------------
+				"company_gstin": getattr(self, "company_gstin", None) 
+					or frappe.db.get_value("Company", self.company, "gstin"),
+				"place_of_supply": getattr(self, "place_of_supply", None),
+				"billing_address_gstin": getattr(self, "billing_address_gstin", None),
+				"gst_category": getattr(self, "gst_category", None),
+				"reverse_charge": getattr(self, "reverse_charge", 0),
+				"invoice_type": getattr(self, "invoice_type", None),
 			})
+
 
 		# ------------------------------------------
 		# 3) ROUND-OFF ADJUSTMENT
