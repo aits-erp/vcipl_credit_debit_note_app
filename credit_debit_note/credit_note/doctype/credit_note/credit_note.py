@@ -1265,479 +1265,428 @@ class CreditNote(SellingController):
 		return normalized
 
 
-		def make_customer_gl_entry(self, gl_entries):
-			# Checked both rounding_adjustment and rounded_total
-			# because rounded_total had value even before introduction of posting GLE based on rounded total
-			grand_total = (
-				self.rounded_total if (self.rounding_adjustment and self.rounded_total) else self.grand_total
+	def make_customer_gl_entry(self, gl_entries):
+		# Checked both rounding_adjustment and rounded_total
+		# because rounded_total had value even before introduction of posting GLE based on rounded total
+		grand_total = (
+			self.rounded_total if (self.rounding_adjustment and self.rounded_total) else self.grand_total
+		)
+
+		base_grand_total = flt(
+			self.base_rounded_total
+			if (self.base_rounding_adjustment and self.base_rounded_total)
+			else self.base_grand_total,
+			self.precision("base_grand_total"),
+		)
+
+		if grand_total and not self.is_internal_transfer():
+
+			against_voucher = self.name
+			if self.is_return and self.return_against and not self.update_outstanding_for_self:
+				against_voucher = self.return_against
+
+			# ---------------------------
+			# 🔥 SIGN CORRECTION FOR CREDIT NOTE
+			# ---------------------------
+			if self.is_return:
+				# Credit Note → CREDIT customer
+				debit = 0
+				credit = base_grand_total
+
+				# account currency handling
+				if self.party_account_currency == self.company_currency:
+					debit_acc = 0
+					credit_acc = base_grand_total
+				else:
+					debit_acc = 0
+					credit_acc = grand_total
+
+				debit_tr = 0
+				credit_tr = grand_total
+
+			else:
+				# Normal Sales Invoice → DEBIT customer
+				debit = base_grand_total
+				credit = 0
+
+				if self.party_account_currency == self.company_currency:
+					debit_acc = base_grand_total
+					credit_acc = 0
+				else:
+					debit_acc = grand_total
+					credit_acc = 0
+
+				debit_tr = grand_total
+				credit_tr = 0
+			# ---------------------------
+			# POST CUSTOMER GL ENTRY
+			# ---------------------------
+			gl_entries.append(
+				self.get_gl_dict(
+					{
+						"account": self.debit_to,
+						"party_type": "Customer",
+						"party": self.customer,
+						"due_date": self.due_date,
+						"against": self.against_income_account,
+
+						"debit": debit,
+						"credit": credit,
+
+						"debit_in_account_currency": debit_acc,
+						"credit_in_account_currency": credit_acc,
+
+						"debit_in_transaction_currency": debit_tr,
+						"credit_in_transaction_currency": credit_tr,
+
+						"against_voucher": against_voucher,
+						"against_voucher_type": self.doctype,
+						"cost_center": self.cost_center,
+						"project": self.project,
+					},
+					self.party_account_currency,
+					item=self,
+				)
 			)
 
-			base_grand_total = flt(
-				self.base_rounded_total
-				if (self.base_rounding_adjustment and self.base_rounded_total)
-				else self.base_grand_total,
-				self.precision("base_grand_total"),
+	def make_tax_gl_entries(self, gl_entries):
+		enable_discount_accounting = cint(
+			frappe.db.get_single_value("Selling Settings", "enable_discount_accounting")
+		)
+
+		for tax in self.get("taxes"):
+			amount, base_amount = self.get_tax_amounts(tax, enable_discount_accounting)
+
+			# If zero tax, skip
+			if not flt(tax.base_tax_amount_after_discount_amount):
+				continue
+
+			account_currency = get_account_currency(tax.account_head)
+
+			# --------------------------
+			# 🔥 Correcting TAX GL for Credit Note
+			# --------------------------
+			if self.is_return:
+				# Credit Note → tax must be DEBIT
+				debit = flt(base_amount, tax.precision("tax_amount_after_discount_amount"))
+				credit = 0
+
+				debit_acc = (
+					flt(base_amount, tax.precision("base_tax_amount_after_discount_amount"))
+					if account_currency == self.company_currency
+					else flt(amount, tax.precision("tax_amount_after_discount_amount"))
+				)
+
+				credit_acc = 0
+
+				debit_tr = flt(amount, tax.precision("tax_amount_after_discount_amount"))
+				credit_tr = 0
+
+			else:
+				# Normal Sales Invoice → tax is CREDIT
+				debit = 0
+				credit = flt(base_amount, tax.precision("tax_amount_after_discount_amount"))
+
+				debit_acc = 0
+				credit_acc = (
+					flt(base_amount, tax.precision("base_tax_amount_after_discount_amount"))
+					if account_currency == self.company_currency
+					else flt(amount, tax.precision("tax_amount_after_discount_amount"))
+				)
+
+				debit_tr = 0
+				credit_tr = flt(amount, tax.precision("tax_amount_after_discount_amount"))
+
+			# --------------------------
+			# POST THE TAX GLE
+			# --------------------------
+			gl_entries.append(
+				self.get_gl_dict(
+					{
+						"account": tax.account_head,
+						"against": self.customer,
+
+						"debit": debit,
+						"credit": credit,
+
+						"debit_in_account_currency": debit_acc,
+						"credit_in_account_currency": credit_acc,
+
+						"debit_in_transaction_currency": debit_tr,
+						"credit_in_transaction_currency": credit_tr,
+
+						"cost_center": tax.cost_center,
+					},
+					account_currency,
+					item=tax,
+				)
 			)
 
-			if grand_total and not self.is_internal_transfer():
+	def make_internal_transfer_gl_entries(self, gl_entries):
+		if self.is_internal_transfer() and flt(self.base_total_taxes_and_charges):
+			account_currency = get_account_currency(self.unrealized_profit_loss_account)
+			gl_entries.append(
+				self.get_gl_dict(
+					{
+						"account": self.unrealized_profit_loss_account,
+						"against": self.customer,
+						"debit": flt(self.total_taxes_and_charges),
+						"debit_in_account_currency": flt(self.base_total_taxes_and_charges),
+						"debit_in_transaction_currency": flt(self.total_taxes_and_charges),
+						"cost_center": self.cost_center,
+					},
+					account_currency,
+					item=self,
+				)
+			)
+
+	def make_item_gl_entries(self, gl_entries):
+		# income account gl entries
+		enable_discount_accounting = cint(
+			frappe.db.get_single_value("Selling Settings", "enable_discount_accounting")
+		)
+
+		for item in self.get("items"):
+			if flt(item.base_net_amount, item.precision("base_net_amount")) or item.is_fixed_asset:
+				# Do not book income for transfer within same company
+				if self.is_internal_transfer():
+					continue
+
+				if item.is_fixed_asset:
+					asset = self.get_asset(item)
+
+					if (self.docstatus == 2 and not self.is_return) or (
+						self.docstatus == 1 and self.is_return
+					):
+						fixed_asset_gl_entries = get_gl_entries_on_asset_regain(
+							asset,
+							item.base_net_amount,
+							item.finance_book,
+							self.get("doctype"),
+							self.get("name"),
+							self.get("posting_date"),
+						)
+						asset.db_set("disposal_date", None)
+						add_asset_activity(asset.name, _("Asset returned"))
+
+						if asset.calculate_depreciation:
+							posting_date = (
+								frappe.db.get_value("Credit Note", self.return_against, "posting_date")
+								if self.is_return
+								else self.posting_date
+							)
+							reverse_depreciation_entry_made_after_disposal(asset, posting_date)
+							notes = _(
+								"This schedule was created when Asset {0} was returned through Credit Note {1}."
+							).format(
+								get_link_to_form(asset.doctype, asset.name),
+								get_link_to_form(self.doctype, self.get("name")),
+							)
+							reset_depreciation_schedule(asset, self.posting_date, notes)
+							asset.reload()
+
+					else:
+						if asset.calculate_depreciation:
+							if not asset.status == "Fully Depreciated":
+								notes = _(
+									"This schedule was created when Asset {0} was sold through Credit Note {1}."
+								).format(
+									get_link_to_form(asset.doctype, asset.name),
+									get_link_to_form(self.doctype, self.get("name")),
+								)
+								depreciate_asset(asset, self.posting_date, notes)
+								asset.reload()
+
+						fixed_asset_gl_entries = get_gl_entries_on_asset_disposal(
+							asset,
+							item.base_net_amount,
+							item.finance_book,
+							self.get("doctype"),
+							self.get("name"),
+							self.get("posting_date"),
+						)
+						asset.db_set("disposal_date", self.posting_date)
+						add_asset_activity(asset.name, _("Asset sold"))
+
+					for gle in fixed_asset_gl_entries:
+						gle["against"] = self.customer
+						gl_entries.append(self.get_gl_dict(gle, item=item))
+
+					self.set_asset_status(asset)
+
+				else:
+					income_account = (
+						item.income_account
+						if (not item.enable_deferred_revenue or self.is_return)
+						else item.deferred_revenue_account
+					)
+
+					amount, base_amount = self.get_amount_and_base_amount(item, enable_discount_accounting)
+
+					account_currency = get_account_currency(income_account)
+					gl_entries.append(
+						self.get_gl_dict(
+							{
+								"account": income_account,
+								"against": self.customer,
+								"credit": flt(base_amount, item.precision("base_net_amount")),
+								"credit_in_account_currency": (
+									flt(base_amount, item.precision("base_net_amount"))
+									if account_currency == self.company_currency
+									else flt(amount, item.precision("net_amount"))
+								),
+								"credit_in_transaction_currency": flt(amount, item.precision("net_amount")),
+								"cost_center": item.cost_center,
+								"project": item.project or self.project,
+							},
+							account_currency,
+							item=item,
+						)
+					)
+
+		# expense account gl entries
+		if cint(self.update_stock) and erpnext.is_perpetual_inventory_enabled(self.company):
+			gl_entries += super().get_gl_entries()
+
+	def get_asset(self, item):
+		if item.get("asset"):
+			asset = frappe.get_doc("Asset", item.asset)
+		else:
+			frappe.throw(
+				_("Row #{0}: You must select an Asset for Item {1}.").format(item.idx, item.item_name),
+				title=_("Missing Asset"),
+			)
+
+		self.check_finance_books(item, asset)
+		return asset
+
+	@property
+	def enable_discount_accounting(self):
+		if not hasattr(self, "_enable_discount_accounting"):
+			self._enable_discount_accounting = cint(
+				frappe.db.get_single_value("Selling Settings", "enable_discount_accounting")
+			)
+
+		return self._enable_discount_accounting
+
+	def set_asset_status(self, asset):
+		if self.is_return and not self.docstatus == 2:
+			asset.set_status()
+		elif self.is_return and self.docstatus == 2:
+			asset.set_status("Sold")
+		else:
+			asset.set_status("Sold" if self.docstatus == 1 else None)
+
+	def make_loyalty_point_redemption_gle(self, gl_entries):
+		if cint(self.redeem_loyalty_points):
+			gl_entries.append(
+				self.get_gl_dict(
+					{
+						"account": self.debit_to,
+						"party_type": "Customer",
+						"party": self.customer,
+						"against": "Expense account - "
+						+ cstr(self.loyalty_redemption_account)
+						+ " for the Loyalty Program",
+						"credit": self.loyalty_amount,
+						"credit_in_transaction_currency": self.loyalty_amount,
+						"against_voucher": self.return_against if cint(self.is_return) else self.name,
+						"against_voucher_type": self.doctype,
+						"cost_center": self.cost_center,
+					},
+					item=self,
+				)
+			)
+			gl_entries.append(
+				self.get_gl_dict(
+					{
+						"account": self.loyalty_redemption_account,
+						"cost_center": self.cost_center or self.loyalty_redemption_cost_center,
+						"against": self.customer,
+						"debit": self.loyalty_amount,
+						"debit_in_transaction_currency": self.loyalty_amount,
+						"remark": "Loyalty Points redeemed by the customer",
+					},
+					item=self,
+				)
+			)
+
+	def make_pos_gl_entries(self, gl_entries):
+		if cint(self.is_pos):
+			skip_change_gl_entries = not cint(
+				frappe.db.get_single_value("Accounts Settings", "post_change_gl_entries")
+			)
+
+			for payment_mode in self.payments:
+				if skip_change_gl_entries and payment_mode.account == self.account_for_change_amount:
+					payment_mode.base_amount -= flt(self.change_amount)
 
 				against_voucher = self.name
 				if self.is_return and self.return_against and not self.update_outstanding_for_self:
 					against_voucher = self.return_against
 
-				# ---------------------------
-				# 🔥 SIGN CORRECTION FOR CREDIT NOTE
-				# ---------------------------
-				if self.is_return:
-					# Credit Note → CREDIT customer
-					debit = 0
-					credit = base_grand_total
-
-					# account currency handling
-					if self.party_account_currency == self.company_currency:
-						debit_acc = 0
-						credit_acc = base_grand_total
-					else:
-						debit_acc = 0
-						credit_acc = grand_total
-
-					debit_tr = 0
-					credit_tr = grand_total
-
-				else:
-					# Normal Sales Invoice → DEBIT customer
-					debit = base_grand_total
-					credit = 0
-
-					if self.party_account_currency == self.company_currency:
-						debit_acc = base_grand_total
-						credit_acc = 0
-					else:
-						debit_acc = grand_total
-						credit_acc = 0
-
-					debit_tr = grand_total
-					credit_tr = 0
-				# ---------------------------
-				# POST CUSTOMER GL ENTRY
-				# ---------------------------
-				gl_entries.append(
-					self.get_gl_dict(
-						{
-							"account": self.debit_to,
-							"party_type": "Customer",
-							"party": self.customer,
-							"due_date": self.due_date,
-							"against": self.against_income_account,
-
-							"debit": debit,
-							"credit": credit,
-
-							"debit_in_account_currency": debit_acc,
-							"credit_in_account_currency": credit_acc,
-
-							"debit_in_transaction_currency": debit_tr,
-							"credit_in_transaction_currency": credit_tr,
-
-							"against_voucher": against_voucher,
-							"against_voucher_type": self.doctype,
-							"cost_center": self.cost_center,
-							"project": self.project,
-						},
-						self.party_account_currency,
-						item=self,
-					)
-				)
-
-		def make_tax_gl_entries(self, gl_entries):
-			enable_discount_accounting = cint(
-				frappe.db.get_single_value("Selling Settings", "enable_discount_accounting")
-			)
-
-			for tax in self.get("taxes"):
-				amount, base_amount = self.get_tax_amounts(tax, enable_discount_accounting)
-
-				# If zero tax, skip
-				if not flt(tax.base_tax_amount_after_discount_amount):
-					continue
-
-				account_currency = get_account_currency(tax.account_head)
-
-				# --------------------------
-				# 🔥 Correcting TAX GL for Credit Note
-				# --------------------------
-				if self.is_return:
-					# Credit Note → tax must be DEBIT
-					debit = flt(base_amount, tax.precision("tax_amount_after_discount_amount"))
-					credit = 0
-
-					debit_acc = (
-						flt(base_amount, tax.precision("base_tax_amount_after_discount_amount"))
-						if account_currency == self.company_currency
-						else flt(amount, tax.precision("tax_amount_after_discount_amount"))
-					)
-
-					credit_acc = 0
-
-					debit_tr = flt(amount, tax.precision("tax_amount_after_discount_amount"))
-					credit_tr = 0
-
-				else:
-					# Normal Sales Invoice → tax is CREDIT
-					debit = 0
-					credit = flt(base_amount, tax.precision("tax_amount_after_discount_amount"))
-
-					debit_acc = 0
-					credit_acc = (
-						flt(base_amount, tax.precision("base_tax_amount_after_discount_amount"))
-						if account_currency == self.company_currency
-						else flt(amount, tax.precision("tax_amount_after_discount_amount"))
-					)
-
-					debit_tr = 0
-					credit_tr = flt(amount, tax.precision("tax_amount_after_discount_amount"))
-
-				# --------------------------
-				# POST THE TAX GLE
-				# --------------------------
-				gl_entries.append(
-					self.get_gl_dict(
-						{
-							"account": tax.account_head,
-							"against": self.customer,
-
-							"debit": debit,
-							"credit": credit,
-
-							"debit_in_account_currency": debit_acc,
-							"credit_in_account_currency": credit_acc,
-
-							"debit_in_transaction_currency": debit_tr,
-							"credit_in_transaction_currency": credit_tr,
-
-							"cost_center": tax.cost_center,
-						},
-						account_currency,
-						item=tax,
-					)
-				)
-
-		def make_internal_transfer_gl_entries(self, gl_entries):
-			if self.is_internal_transfer() and flt(self.base_total_taxes_and_charges):
-				account_currency = get_account_currency(self.unrealized_profit_loss_account)
-				gl_entries.append(
-					self.get_gl_dict(
-						{
-							"account": self.unrealized_profit_loss_account,
-							"against": self.customer,
-							"debit": flt(self.total_taxes_and_charges),
-							"debit_in_account_currency": flt(self.base_total_taxes_and_charges),
-							"debit_in_transaction_currency": flt(self.total_taxes_and_charges),
-							"cost_center": self.cost_center,
-						},
-						account_currency,
-						item=self,
-					)
-				)
-
-		def make_item_gl_entries(self, gl_entries):
-			# income account gl entries
-			enable_discount_accounting = cint(
-				frappe.db.get_single_value("Selling Settings", "enable_discount_accounting")
-			)
-
-			for item in self.get("items"):
-				if flt(item.base_net_amount, item.precision("base_net_amount")) or item.is_fixed_asset:
-					# Do not book income for transfer within same company
-					if self.is_internal_transfer():
-						continue
-
-					if item.is_fixed_asset:
-						asset = self.get_asset(item)
-
-						if (self.docstatus == 2 and not self.is_return) or (
-							self.docstatus == 1 and self.is_return
-						):
-							fixed_asset_gl_entries = get_gl_entries_on_asset_regain(
-								asset,
-								item.base_net_amount,
-								item.finance_book,
-								self.get("doctype"),
-								self.get("name"),
-								self.get("posting_date"),
-							)
-							asset.db_set("disposal_date", None)
-							add_asset_activity(asset.name, _("Asset returned"))
-
-							if asset.calculate_depreciation:
-								posting_date = (
-									frappe.db.get_value("Credit Note", self.return_against, "posting_date")
-									if self.is_return
-									else self.posting_date
-								)
-								reverse_depreciation_entry_made_after_disposal(asset, posting_date)
-								notes = _(
-									"This schedule was created when Asset {0} was returned through Credit Note {1}."
-								).format(
-									get_link_to_form(asset.doctype, asset.name),
-									get_link_to_form(self.doctype, self.get("name")),
-								)
-								reset_depreciation_schedule(asset, self.posting_date, notes)
-								asset.reload()
-
-						else:
-							if asset.calculate_depreciation:
-								if not asset.status == "Fully Depreciated":
-									notes = _(
-										"This schedule was created when Asset {0} was sold through Credit Note {1}."
-									).format(
-										get_link_to_form(asset.doctype, asset.name),
-										get_link_to_form(self.doctype, self.get("name")),
-									)
-									depreciate_asset(asset, self.posting_date, notes)
-									asset.reload()
-
-							fixed_asset_gl_entries = get_gl_entries_on_asset_disposal(
-								asset,
-								item.base_net_amount,
-								item.finance_book,
-								self.get("doctype"),
-								self.get("name"),
-								self.get("posting_date"),
-							)
-							asset.db_set("disposal_date", self.posting_date)
-							add_asset_activity(asset.name, _("Asset sold"))
-
-						for gle in fixed_asset_gl_entries:
-							gle["against"] = self.customer
-							gl_entries.append(self.get_gl_dict(gle, item=item))
-
-						self.set_asset_status(asset)
-
-					else:
-						income_account = (
-							item.income_account
-							if (not item.enable_deferred_revenue or self.is_return)
-							else item.deferred_revenue_account
-						)
-
-						amount, base_amount = self.get_amount_and_base_amount(item, enable_discount_accounting)
-
-						account_currency = get_account_currency(income_account)
-						gl_entries.append(
-							self.get_gl_dict(
-								{
-									"account": income_account,
-									"against": self.customer,
-									"credit": flt(base_amount, item.precision("base_net_amount")),
-									"credit_in_account_currency": (
-										flt(base_amount, item.precision("base_net_amount"))
-										if account_currency == self.company_currency
-										else flt(amount, item.precision("net_amount"))
-									),
-									"credit_in_transaction_currency": flt(amount, item.precision("net_amount")),
-									"cost_center": item.cost_center,
-									"project": item.project or self.project,
-								},
-								account_currency,
-								item=item,
-							)
-						)
-
-			# expense account gl entries
-			if cint(self.update_stock) and erpnext.is_perpetual_inventory_enabled(self.company):
-				gl_entries += super().get_gl_entries()
-
-		def get_asset(self, item):
-			if item.get("asset"):
-				asset = frappe.get_doc("Asset", item.asset)
-			else:
-				frappe.throw(
-					_("Row #{0}: You must select an Asset for Item {1}.").format(item.idx, item.item_name),
-					title=_("Missing Asset"),
-				)
-
-			self.check_finance_books(item, asset)
-			return asset
-
-		@property
-		def enable_discount_accounting(self):
-			if not hasattr(self, "_enable_discount_accounting"):
-				self._enable_discount_accounting = cint(
-					frappe.db.get_single_value("Selling Settings", "enable_discount_accounting")
-				)
-
-			return self._enable_discount_accounting
-
-		def set_asset_status(self, asset):
-			if self.is_return and not self.docstatus == 2:
-				asset.set_status()
-			elif self.is_return and self.docstatus == 2:
-				asset.set_status("Sold")
-			else:
-				asset.set_status("Sold" if self.docstatus == 1 else None)
-
-		def make_loyalty_point_redemption_gle(self, gl_entries):
-			if cint(self.redeem_loyalty_points):
-				gl_entries.append(
-					self.get_gl_dict(
-						{
-							"account": self.debit_to,
-							"party_type": "Customer",
-							"party": self.customer,
-							"against": "Expense account - "
-							+ cstr(self.loyalty_redemption_account)
-							+ " for the Loyalty Program",
-							"credit": self.loyalty_amount,
-							"credit_in_transaction_currency": self.loyalty_amount,
-							"against_voucher": self.return_against if cint(self.is_return) else self.name,
-							"against_voucher_type": self.doctype,
-							"cost_center": self.cost_center,
-						},
-						item=self,
-					)
-				)
-				gl_entries.append(
-					self.get_gl_dict(
-						{
-							"account": self.loyalty_redemption_account,
-							"cost_center": self.cost_center or self.loyalty_redemption_cost_center,
-							"against": self.customer,
-							"debit": self.loyalty_amount,
-							"debit_in_transaction_currency": self.loyalty_amount,
-							"remark": "Loyalty Points redeemed by the customer",
-						},
-						item=self,
-					)
-				)
-
-		def make_pos_gl_entries(self, gl_entries):
-			if cint(self.is_pos):
-				skip_change_gl_entries = not cint(
-					frappe.db.get_single_value("Accounts Settings", "post_change_gl_entries")
-				)
-
-				for payment_mode in self.payments:
-					if skip_change_gl_entries and payment_mode.account == self.account_for_change_amount:
-						payment_mode.base_amount -= flt(self.change_amount)
-
-					against_voucher = self.name
-					if self.is_return and self.return_against and not self.update_outstanding_for_self:
-						against_voucher = self.return_against
-
-					if payment_mode.base_amount:
-						# POS, make payment entries
-						gl_entries.append(
-							self.get_gl_dict(
-								{
-									"account": self.debit_to,
-									"party_type": "Customer",
-									"party": self.customer,
-									"against": payment_mode.account,
-									"credit": payment_mode.base_amount,
-									"credit_in_account_currency": payment_mode.base_amount
-									if self.party_account_currency == self.company_currency
-									else payment_mode.amount,
-									"credit_in_transaction_currency": payment_mode.amount,
-									"against_voucher": against_voucher,
-									"against_voucher_type": self.doctype,
-									"cost_center": self.cost_center,
-								},
-								self.party_account_currency,
-								item=self,
-							)
-						)
-
-						payment_mode_account_currency = get_account_currency(payment_mode.account)
-						gl_entries.append(
-							self.get_gl_dict(
-								{
-									"account": payment_mode.account,
-									"against": self.customer,
-									"debit": payment_mode.base_amount,
-									"debit_in_account_currency": payment_mode.base_amount
-									if payment_mode_account_currency == self.company_currency
-									else payment_mode.amount,
-									"debit_in_transaction_currency": payment_mode.amount,
-									"cost_center": self.cost_center,
-								},
-								payment_mode_account_currency,
-								item=self,
-							)
-						)
-
-				if not skip_change_gl_entries:
-					self.make_gle_for_change_amount(gl_entries)
-
-		def make_gle_for_change_amount(self, gl_entries):
-			if self.change_amount:
-				if self.account_for_change_amount:
+				if payment_mode.base_amount:
+					# POS, make payment entries
 					gl_entries.append(
 						self.get_gl_dict(
 							{
 								"account": self.debit_to,
 								"party_type": "Customer",
 								"party": self.customer,
-								"against": self.account_for_change_amount,
-								"debit": flt(self.base_change_amount),
-								"debit_in_account_currency": flt(self.base_change_amount)
+								"against": payment_mode.account,
+								"credit": payment_mode.base_amount,
+								"credit_in_account_currency": payment_mode.base_amount
 								if self.party_account_currency == self.company_currency
-								else flt(self.change_amount),
-								"debit_in_transaction_currency": flt(self.change_amount),
-								"against_voucher": self.return_against
-								if cint(self.is_return) and self.return_against
-								else self.name,
+								else payment_mode.amount,
+								"credit_in_transaction_currency": payment_mode.amount,
+								"against_voucher": against_voucher,
 								"against_voucher_type": self.doctype,
 								"cost_center": self.cost_center,
-								"project": self.project,
 							},
 							self.party_account_currency,
 							item=self,
 						)
 					)
 
+					payment_mode_account_currency = get_account_currency(payment_mode.account)
 					gl_entries.append(
 						self.get_gl_dict(
 							{
-								"account": self.account_for_change_amount,
+								"account": payment_mode.account,
 								"against": self.customer,
-								"credit": self.base_change_amount,
-								"credit_in_transaction_currency": self.change_amount,
+								"debit": payment_mode.base_amount,
+								"debit_in_account_currency": payment_mode.base_amount
+								if payment_mode_account_currency == self.company_currency
+								else payment_mode.amount,
+								"debit_in_transaction_currency": payment_mode.amount,
 								"cost_center": self.cost_center,
 							},
+							payment_mode_account_currency,
 							item=self,
 						)
 					)
-				else:
-					frappe.throw(_("Select change amount account"), title=_("Mandatory Field"))
 
-		def make_write_off_gl_entry(self, gl_entries):
-			# write off entries, applicable if only pos
-			if (
-				self.is_pos
-				and self.write_off_account
-				and flt(self.write_off_amount, self.precision("write_off_amount"))
-			):
-				write_off_account_currency = get_account_currency(self.write_off_account)
-				default_cost_center = frappe.get_cached_value("Company", self.company, "cost_center")
+			if not skip_change_gl_entries:
+				self.make_gle_for_change_amount(gl_entries)
 
+	def make_gle_for_change_amount(self, gl_entries):
+		if self.change_amount:
+			if self.account_for_change_amount:
 				gl_entries.append(
 					self.get_gl_dict(
 						{
 							"account": self.debit_to,
 							"party_type": "Customer",
 							"party": self.customer,
-							"against": self.write_off_account,
-							"credit": flt(self.base_write_off_amount, self.precision("base_write_off_amount")),
-							"credit_in_account_currency": (
-								flt(self.base_write_off_amount, self.precision("base_write_off_amount"))
-								if self.party_account_currency == self.company_currency
-								else flt(self.write_off_amount, self.precision("write_off_amount"))
-							),
-							"credit_in_transaction_currency": flt(
-								self.write_off_amount, self.precision("write_off_amount")
-							),
-							"against_voucher": self.return_against if cint(self.is_return) else self.name,
+							"against": self.account_for_change_amount,
+							"debit": flt(self.base_change_amount),
+							"debit_in_account_currency": flt(self.base_change_amount)
+							if self.party_account_currency == self.company_currency
+							else flt(self.change_amount),
+							"debit_in_transaction_currency": flt(self.change_amount),
+							"against_voucher": self.return_against
+							if cint(self.is_return) and self.return_against
+							else self.name,
 							"against_voucher_type": self.doctype,
 							"cost_center": self.cost_center,
 							"project": self.project,
@@ -1746,306 +1695,357 @@ class CreditNote(SellingController):
 						item=self,
 					)
 				)
-				gl_entries.append(
-					self.get_gl_dict(
-						{
-							"account": self.write_off_account,
-							"against": self.customer,
-							"debit": flt(self.base_write_off_amount, self.precision("base_write_off_amount")),
-							"debit_in_account_currency": (
-								flt(self.base_write_off_amount, self.precision("base_write_off_amount"))
-								if write_off_account_currency == self.company_currency
-								else flt(self.write_off_amount, self.precision("write_off_amount"))
-							),
-							"debit_in_transaction_currency": flt(
-								self.write_off_amount, self.precision("write_off_amount")
-							),
-							"cost_center": self.cost_center or self.write_off_cost_center or default_cost_center,
-						},
-						write_off_account_currency,
-						item=self,
-					)
-				)
-
-		def make_gle_for_rounding_adjustment(self, gl_entries):
-			if (
-				flt(self.rounding_adjustment, self.precision("rounding_adjustment"))
-				and self.base_rounding_adjustment
-				and not self.is_internal_transfer()
-			):
-				(
-					round_off_account,
-					round_off_cost_center,
-					round_off_for_opening,
-				) = get_round_off_account_and_cost_center(
-					self.company, "Credit Note", self.name, self.use_company_roundoff_cost_center
-				)
-
-				if self.is_opening == "Yes" and self.rounding_adjustment:
-					if not round_off_for_opening:
-						frappe.throw(
-							_(
-								"Opening Invoice has rounding adjustment of {0}.<br><br> '{1}' account is required to post these values. Please set it in Company: {2}.<br><br> Or, '{3}' can be enabled to not post any rounding adjustment."
-							).format(
-								frappe.bold(self.rounding_adjustment),
-								frappe.bold("Round Off for Opening"),
-								get_link_to_form("Company", self.company),
-								frappe.bold("Disable Rounded Total"),
-							)
-						)
-					else:
-						round_off_account = round_off_for_opening
 
 				gl_entries.append(
 					self.get_gl_dict(
 						{
-							"account": round_off_account,
+							"account": self.account_for_change_amount,
 							"against": self.customer,
-							"credit_in_account_currency": flt(
-								self.rounding_adjustment, self.precision("rounding_adjustment")
-							),
-							"credit_in_transaction_currency": flt(
-								self.rounding_adjustment, self.precision("rounding_adjustment")
-							),
-							"credit": flt(
-								self.base_rounding_adjustment, self.precision("base_rounding_adjustment")
-							),
-							"cost_center": round_off_cost_center
-							if self.use_company_roundoff_cost_center
-							else (self.cost_center or round_off_cost_center),
+							"credit": self.base_change_amount,
+							"credit_in_transaction_currency": self.change_amount,
+							"cost_center": self.cost_center,
 						},
 						item=self,
 					)
-				)
-
-		def update_billing_status_in_dn(self, update_modified=True):
-			if self.is_return and not self.update_billed_amount_in_delivery_note:
-				return
-			updated_delivery_notes = []
-			for d in self.get("items"):
-				if d.dn_detail:
-					billed_amt = frappe.db.sql(
-						"""select sum(amount) from `tabSales Invoice Item`
-						where dn_detail=%s and docstatus=1""",
-						d.dn_detail,
-					)
-					billed_amt = billed_amt and billed_amt[0][0] or 0
-					frappe.db.set_value(
-						"Delivery Note Item",
-						d.dn_detail,
-						"billed_amt",
-						billed_amt,
-						update_modified=update_modified,
-					)
-					updated_delivery_notes.append(d.delivery_note)
-				elif d.so_detail:
-					updated_delivery_notes += update_billed_amount_based_on_so(d.so_detail, update_modified)
-
-			for dn in set(updated_delivery_notes):
-				frappe.get_doc("Delivery Note", dn).update_billing_percentage(update_modified=update_modified)
-
-		def on_recurring(self, reference_doc, auto_repeat_doc):
-			self.set("write_off_amount", reference_doc.get("write_off_amount"))
-			self.due_date = None
-
-		def update_project(self):
-			unique_projects = list(set([d.project for d in self.get("items") if d.project]))
-			if self.project and self.project not in unique_projects:
-				unique_projects.append(self.project)
-
-			for p in unique_projects:
-				project = frappe.get_doc("Project", p)
-				project.update_billed_amount()
-				project.calculate_gross_margin()
-				project.db_update()
-
-		def verify_payment_amount_is_positive(self):
-			for entry in self.payments:
-				if entry.amount < 0:
-					frappe.throw(_("Row #{0} (Payment Table): Amount must be positive").format(entry.idx))
-
-		def verify_payment_amount_is_negative(self):
-			for entry in self.payments:
-				if entry.amount > 0:
-					frappe.throw(_("Row #{0} (Payment Table): Amount must be negative").format(entry.idx))
-
-		# collection of the loyalty points, create the ledger entry for that.
-		def make_loyalty_point_entry(self):
-			returned_amount = self.get_returned_amount()
-			current_amount = flt(self.grand_total) - cint(self.loyalty_amount)
-			eligible_amount = current_amount - returned_amount
-			lp_details = get_loyalty_program_details_with_points(
-				self.customer,
-				company=self.company,
-				current_transaction_amount=current_amount,
-				loyalty_program=self.loyalty_program,
-				expiry_date=self.posting_date,
-				include_expired_entry=True,
-			)
-			if (
-				lp_details
-				and getdate(lp_details.from_date) <= getdate(self.posting_date)
-				and (not lp_details.to_date or getdate(lp_details.to_date) >= getdate(self.posting_date))
-			):
-				collection_factor = lp_details.collection_factor if lp_details.collection_factor else 1.0
-				points_earned = cint(eligible_amount / collection_factor)
-
-				doc = frappe.get_doc(
-					{
-						"doctype": "Loyalty Point Entry",
-						"company": self.company,
-						"loyalty_program": lp_details.loyalty_program,
-						"loyalty_program_tier": lp_details.tier_name,
-						"customer": self.customer,
-						"invoice_type": self.doctype,
-						"invoice": self.name,
-						"loyalty_points": points_earned,
-						"purchase_amount": eligible_amount,
-						"expiry_date": add_days(self.posting_date, lp_details.expiry_duration),
-						"posting_date": self.posting_date,
-					}
-				)
-				doc.flags.ignore_permissions = 1
-				doc.save()
-				self.set_loyalty_program_tier()
-
-		# valdite the redemption and then delete the loyalty points earned on cancel of the invoice
-		def delete_loyalty_point_entry(self):
-			lp_entry = frappe.db.sql(
-				"select name from `tabLoyalty Point Entry` where invoice=%s", (self.name), as_dict=1
-			)
-
-			if not lp_entry:
-				return
-			against_lp_entry = frappe.db.sql(
-				"""select name, invoice from `tabLoyalty Point Entry`
-				where redeem_against=%s""",
-				(lp_entry[0].name),
-				as_dict=1,
-			)
-			if against_lp_entry:
-				invoice_list = ", ".join([d.invoice for d in against_lp_entry])
-				frappe.throw(
-					_(
-						"""{} can't be cancelled since the Loyalty Points earned has been redeemed. First cancel the {} No {}"""
-					).format(self.doctype, self.doctype, invoice_list)
 				)
 			else:
-				frappe.db.sql("""delete from `tabLoyalty Point Entry` where invoice=%s""", (self.name))
-				# Set loyalty program
-				self.set_loyalty_program_tier()
+				frappe.throw(_("Select change amount account"), title=_("Mandatory Field"))
 
-		def set_loyalty_program_tier(self):
-			lp_details = get_loyalty_program_details_with_points(
-				self.customer,
-				company=self.company,
-				loyalty_program=self.loyalty_program,
-				include_expired_entry=True,
-			)
-			frappe.db.set_value("Customer", self.customer, "loyalty_program_tier", lp_details.tier_name)
+	def make_write_off_gl_entry(self, gl_entries):
+		# write off entries, applicable if only pos
+		if (
+			self.is_pos
+			and self.write_off_account
+			and flt(self.write_off_amount, self.precision("write_off_amount"))
+		):
+			write_off_account_currency = get_account_currency(self.write_off_account)
+			default_cost_center = frappe.get_cached_value("Company", self.company, "cost_center")
 
-		def get_returned_amount(self):
-			from frappe.query_builder.functions import Sum
-
-			doc = frappe.qb.DocType(self.doctype)
-			returned_amount = (
-				frappe.qb.from_(doc)
-				.select(Sum(doc.grand_total))
-				.where((doc.docstatus == 1) & (doc.is_return == 1) & (doc.return_against == self.name))
-			).run()
-
-			return abs(returned_amount[0][0]) if returned_amount[0][0] else 0
-
-		# redeem the loyalty points.
-		def apply_loyalty_points(self):
-			from erpnext.accounts.doctype.loyalty_point_entry.loyalty_point_entry import (
-				get_loyalty_point_entries,
-				get_redemption_details,
-			)
-
-			loyalty_point_entries = get_loyalty_point_entries(
-				self.customer, self.loyalty_program, self.company, self.posting_date
-			)
-			redemption_details = get_redemption_details(self.customer, self.loyalty_program, self.company)
-
-			points_to_redeem = self.loyalty_points
-			for lp_entry in loyalty_point_entries:
-				if lp_entry.invoice_type != self.doctype or lp_entry.invoice == self.name:
-					# redeemption should be done against same doctype
-					# also it shouldn't be against itself
-					continue
-				available_points = lp_entry.loyalty_points - flt(redemption_details.get(lp_entry.name))
-				if available_points > points_to_redeem:
-					redeemed_points = points_to_redeem
-				else:
-					redeemed_points = available_points
-				doc = frappe.get_doc(
+			gl_entries.append(
+				self.get_gl_dict(
 					{
-						"doctype": "Loyalty Point Entry",
-						"company": self.company,
-						"loyalty_program": self.loyalty_program,
-						"loyalty_program_tier": lp_entry.loyalty_program_tier,
-						"customer": self.customer,
-						"invoice_type": self.doctype,
-						"invoice": self.name,
-						"redeem_against": lp_entry.name,
-						"loyalty_points": -1 * redeemed_points,
-						"purchase_amount": self.grand_total,
-						"expiry_date": lp_entry.expiry_date,
-						"posting_date": self.posting_date,
-					}
+						"account": self.debit_to,
+						"party_type": "Customer",
+						"party": self.customer,
+						"against": self.write_off_account,
+						"credit": flt(self.base_write_off_amount, self.precision("base_write_off_amount")),
+						"credit_in_account_currency": (
+							flt(self.base_write_off_amount, self.precision("base_write_off_amount"))
+							if self.party_account_currency == self.company_currency
+							else flt(self.write_off_amount, self.precision("write_off_amount"))
+						),
+						"credit_in_transaction_currency": flt(
+							self.write_off_amount, self.precision("write_off_amount")
+						),
+						"against_voucher": self.return_against if cint(self.is_return) else self.name,
+						"against_voucher_type": self.doctype,
+						"cost_center": self.cost_center,
+						"project": self.project,
+					},
+					self.party_account_currency,
+					item=self,
 				)
-				doc.flags.ignore_permissions = 1
-				doc.save()
-				points_to_redeem -= redeemed_points
-				if points_to_redeem < 1:  # since points_to_redeem is integer
-					break
+			)
+			gl_entries.append(
+				self.get_gl_dict(
+					{
+						"account": self.write_off_account,
+						"against": self.customer,
+						"debit": flt(self.base_write_off_amount, self.precision("base_write_off_amount")),
+						"debit_in_account_currency": (
+							flt(self.base_write_off_amount, self.precision("base_write_off_amount"))
+							if write_off_account_currency == self.company_currency
+							else flt(self.write_off_amount, self.precision("write_off_amount"))
+						),
+						"debit_in_transaction_currency": flt(
+							self.write_off_amount, self.precision("write_off_amount")
+						),
+						"cost_center": self.cost_center or self.write_off_cost_center or default_cost_center,
+					},
+					write_off_account_currency,
+					item=self,
+				)
+			)
 
-		def set_status(self, update=False, status=None, update_modified=True):
-			if self.is_new():
-				if self.get("amended_from"):
-					self.status = "Draft"
-				return
+	def make_gle_for_rounding_adjustment(self, gl_entries):
+		if (
+			flt(self.rounding_adjustment, self.precision("rounding_adjustment"))
+			and self.base_rounding_adjustment
+			and not self.is_internal_transfer()
+		):
+			(
+				round_off_account,
+				round_off_cost_center,
+				round_off_for_opening,
+			) = get_round_off_account_and_cost_center(
+				self.company, "Credit Note", self.name, self.use_company_roundoff_cost_center
+			)
 
-			outstanding_amount = flt(self.outstanding_amount, self.precision("outstanding_amount"))
-			total = get_total_in_party_account_currency(self)
-
-			if not status:
-				if self.docstatus == 2:
-					status = "Cancelled"
-				elif self.docstatus == 1:
-					if self.is_internal_transfer():
-						self.status = "Internal Transfer"
-					elif is_overdue(self, total):
-						self.status = "Overdue"
-					elif 0 < outstanding_amount < total:
-						self.status = "Partly Paid"
-					elif outstanding_amount > 0 and getdate(self.due_date) >= getdate():
-						self.status = "Unpaid"
-					# Check if outstanding amount is 0 due to credit note issued against invoice
-					elif self.is_return == 0 and frappe.db.get_value(
-						"Credit Note", {"is_return": 1, "return_against": self.name, "docstatus": 1}
-					):
-						self.status = "Credit Note Issued"
-					elif self.is_return == 1:
-						self.status = "Return"
-					elif outstanding_amount <= 0:
-						self.status = "Paid"
-					else:
-						self.status = "Submitted"
-
-					if (
-						self.status in ("Unpaid", "Partly Paid", "Overdue")
-						and self.is_discounted
-						and get_discounting_status(self.name) == "Disbursed"
-					):
-						self.status += " and Discounted"
-
+			if self.is_opening == "Yes" and self.rounding_adjustment:
+				if not round_off_for_opening:
+					frappe.throw(
+						_(
+							"Opening Invoice has rounding adjustment of {0}.<br><br> '{1}' account is required to post these values. Please set it in Company: {2}.<br><br> Or, '{3}' can be enabled to not post any rounding adjustment."
+						).format(
+							frappe.bold(self.rounding_adjustment),
+							frappe.bold("Round Off for Opening"),
+							get_link_to_form("Company", self.company),
+							frappe.bold("Disable Rounded Total"),
+						)
+					)
 				else:
-					self.status = "Draft"
+					round_off_account = round_off_for_opening
 
-			if update:
-				self.db_set("status", self.status, update_modified=update_modified)
+			gl_entries.append(
+				self.get_gl_dict(
+					{
+						"account": round_off_account,
+						"against": self.customer,
+						"credit_in_account_currency": flt(
+							self.rounding_adjustment, self.precision("rounding_adjustment")
+						),
+						"credit_in_transaction_currency": flt(
+							self.rounding_adjustment, self.precision("rounding_adjustment")
+						),
+						"credit": flt(
+							self.base_rounding_adjustment, self.precision("base_rounding_adjustment")
+						),
+						"cost_center": round_off_cost_center
+						if self.use_company_roundoff_cost_center
+						else (self.cost_center or round_off_cost_center),
+					},
+					item=self,
+				)
+			)
+
+	def update_billing_status_in_dn(self, update_modified=True):
+		if self.is_return and not self.update_billed_amount_in_delivery_note:
+			return
+		updated_delivery_notes = []
+		for d in self.get("items"):
+			if d.dn_detail:
+				billed_amt = frappe.db.sql(
+					"""select sum(amount) from `tabSales Invoice Item`
+					where dn_detail=%s and docstatus=1""",
+					d.dn_detail,
+				)
+				billed_amt = billed_amt and billed_amt[0][0] or 0
+				frappe.db.set_value(
+					"Delivery Note Item",
+					d.dn_detail,
+					"billed_amt",
+					billed_amt,
+					update_modified=update_modified,
+				)
+				updated_delivery_notes.append(d.delivery_note)
+			elif d.so_detail:
+				updated_delivery_notes += update_billed_amount_based_on_so(d.so_detail, update_modified)
+
+		for dn in set(updated_delivery_notes):
+			frappe.get_doc("Delivery Note", dn).update_billing_percentage(update_modified=update_modified)
+
+	def on_recurring(self, reference_doc, auto_repeat_doc):
+		self.set("write_off_amount", reference_doc.get("write_off_amount"))
+		self.due_date = None
+
+	def update_project(self):
+		unique_projects = list(set([d.project for d in self.get("items") if d.project]))
+		if self.project and self.project not in unique_projects:
+			unique_projects.append(self.project)
+
+		for p in unique_projects:
+			project = frappe.get_doc("Project", p)
+			project.update_billed_amount()
+			project.calculate_gross_margin()
+			project.db_update()
+
+	def verify_payment_amount_is_positive(self):
+		for entry in self.payments:
+			if entry.amount < 0:
+				frappe.throw(_("Row #{0} (Payment Table): Amount must be positive").format(entry.idx))
+
+	def verify_payment_amount_is_negative(self):
+		for entry in self.payments:
+			if entry.amount > 0:
+				frappe.throw(_("Row #{0} (Payment Table): Amount must be negative").format(entry.idx))
+
+	# collection of the loyalty points, create the ledger entry for that.
+	def make_loyalty_point_entry(self):
+		returned_amount = self.get_returned_amount()
+		current_amount = flt(self.grand_total) - cint(self.loyalty_amount)
+		eligible_amount = current_amount - returned_amount
+		lp_details = get_loyalty_program_details_with_points(
+			self.customer,
+			company=self.company,
+			current_transaction_amount=current_amount,
+			loyalty_program=self.loyalty_program,
+			expiry_date=self.posting_date,
+			include_expired_entry=True,
+		)
+		if (
+			lp_details
+			and getdate(lp_details.from_date) <= getdate(self.posting_date)
+			and (not lp_details.to_date or getdate(lp_details.to_date) >= getdate(self.posting_date))
+		):
+			collection_factor = lp_details.collection_factor if lp_details.collection_factor else 1.0
+			points_earned = cint(eligible_amount / collection_factor)
+
+			doc = frappe.get_doc(
+				{
+					"doctype": "Loyalty Point Entry",
+					"company": self.company,
+					"loyalty_program": lp_details.loyalty_program,
+					"loyalty_program_tier": lp_details.tier_name,
+					"customer": self.customer,
+					"invoice_type": self.doctype,
+					"invoice": self.name,
+					"loyalty_points": points_earned,
+					"purchase_amount": eligible_amount,
+					"expiry_date": add_days(self.posting_date, lp_details.expiry_duration),
+					"posting_date": self.posting_date,
+				}
+			)
+			doc.flags.ignore_permissions = 1
+			doc.save()
+			self.set_loyalty_program_tier()
+
+	# valdite the redemption and then delete the loyalty points earned on cancel of the invoice
+	def delete_loyalty_point_entry(self):
+		lp_entry = frappe.db.sql(
+			"select name from `tabLoyalty Point Entry` where invoice=%s", (self.name), as_dict=1
+		)
+
+		if not lp_entry:
+			return
+		against_lp_entry = frappe.db.sql(
+			"""select name, invoice from `tabLoyalty Point Entry`
+			where redeem_against=%s""",
+			(lp_entry[0].name),
+			as_dict=1,
+		)
+		if against_lp_entry:
+			invoice_list = ", ".join([d.invoice for d in against_lp_entry])
+			frappe.throw(
+				_(
+					"""{} can't be cancelled since the Loyalty Points earned has been redeemed. First cancel the {} No {}"""
+				).format(self.doctype, self.doctype, invoice_list)
+			)
+		else:
+			frappe.db.sql("""delete from `tabLoyalty Point Entry` where invoice=%s""", (self.name))
+			# Set loyalty program
+			self.set_loyalty_program_tier()
+
+	def set_loyalty_program_tier(self):
+		lp_details = get_loyalty_program_details_with_points(
+			self.customer,
+			company=self.company,
+			loyalty_program=self.loyalty_program,
+			include_expired_entry=True,
+		)
+		frappe.db.set_value("Customer", self.customer, "loyalty_program_tier", lp_details.tier_name)
+
+	def get_returned_amount(self):
+		from frappe.query_builder.functions import Sum
+
+		doc = frappe.qb.DocType(self.doctype)
+		returned_amount = (
+			frappe.qb.from_(doc)
+			.select(Sum(doc.grand_total))
+			.where((doc.docstatus == 1) & (doc.is_return == 1) & (doc.return_against == self.name))
+		).run()
+
+		return abs(returned_amount[0][0]) if returned_amount[0][0] else 0
+
+	# redeem the loyalty points.
+	def apply_loyalty_points(self):
+		from erpnext.accounts.doctype.loyalty_point_entry.loyalty_point_entry import (
+			get_loyalty_point_entries,
+			get_redemption_details,
+		)
+
+		loyalty_point_entries = get_loyalty_point_entries(
+			self.customer, self.loyalty_program, self.company, self.posting_date
+		)
+		redemption_details = get_redemption_details(self.customer, self.loyalty_program, self.company)
+
+		points_to_redeem = self.loyalty_points
+		for lp_entry in loyalty_point_entries:
+			if lp_entry.invoice_type != self.doctype or lp_entry.invoice == self.name:
+				# redeemption should be done against same doctype
+				# also it shouldn't be against itself
+				continue
+			available_points = lp_entry.loyalty_points - flt(redemption_details.get(lp_entry.name))
+			if available_points > points_to_redeem:
+				redeemed_points = points_to_redeem
+			else:
+				redeemed_points = available_points
+			doc = frappe.get_doc(
+				{
+					"doctype": "Loyalty Point Entry",
+					"company": self.company,
+					"loyalty_program": self.loyalty_program,
+					"loyalty_program_tier": lp_entry.loyalty_program_tier,
+					"customer": self.customer,
+					"invoice_type": self.doctype,
+					"invoice": self.name,
+					"redeem_against": lp_entry.name,
+					"loyalty_points": -1 * redeemed_points,
+					"purchase_amount": self.grand_total,
+					"expiry_date": lp_entry.expiry_date,
+					"posting_date": self.posting_date,
+				}
+			)
+			doc.flags.ignore_permissions = 1
+			doc.save()
+			points_to_redeem -= redeemed_points
+			if points_to_redeem < 1:  # since points_to_redeem is integer
+				break
+
+	def set_status(self, update=False, status=None, update_modified=True):
+		if self.is_new():
+			if self.get("amended_from"):
+				self.status = "Draft"
+			return
+
+		outstanding_amount = flt(self.outstanding_amount, self.precision("outstanding_amount"))
+		total = get_total_in_party_account_currency(self)
+
+		if not status:
+			if self.docstatus == 2:
+				status = "Cancelled"
+			elif self.docstatus == 1:
+				if self.is_internal_transfer():
+					self.status = "Internal Transfer"
+				elif is_overdue(self, total):
+					self.status = "Overdue"
+				elif 0 < outstanding_amount < total:
+					self.status = "Partly Paid"
+				elif outstanding_amount > 0 and getdate(self.due_date) >= getdate():
+					self.status = "Unpaid"
+				# Check if outstanding amount is 0 due to credit note issued against invoice
+				elif self.is_return == 0 and frappe.db.get_value(
+					"Credit Note", {"is_return": 1, "return_against": self.name, "docstatus": 1}
+				):
+					self.status = "Credit Note Issued"
+				elif self.is_return == 1:
+					self.status = "Return"
+				elif outstanding_amount <= 0:
+					self.status = "Paid"
+				else:
+					self.status = "Submitted"
+
+				if (
+					self.status in ("Unpaid", "Partly Paid", "Overdue")
+					and self.is_discounted
+					and get_discounting_status(self.name) == "Disbursed"
+				):
+					self.status += " and Discounted"
+
+			else:
+				self.status = "Draft"
+
+		if update:
+			self.db_set("status", self.status, update_modified=update_modified)
 
 
 def get_total_in_party_account_currency(doc):
