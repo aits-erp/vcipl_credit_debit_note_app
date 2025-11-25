@@ -9,6 +9,9 @@ fixtures = [
     {"doctype": "Custom Field", "filters": [
         ["dt", "in", ["Credit Note"]]
     ]},
+    {"doctype": "Custom Field", "filters": [
+        ["dt", "in", ["Debit Note"]]
+    ]},
 ]
 
 # Apps

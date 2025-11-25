@@ -675,34 +675,259 @@ class DebitNote(BuyingController):
 				party=self.supplier,
 			)
 
+	# def get_gl_entries(self, warehouse_account=None):
+	# 	self.auto_accounting_for_stock = erpnext.is_perpetual_inventory_enabled(self.company)
+
+	# 	if self.auto_accounting_for_stock:
+	# 		self.stock_received_but_not_billed = self.get_company_default("stock_received_but_not_billed")
+	# 	else:
+	# 		self.stock_received_but_not_billed = None
+
+	# 	self.negative_expense_to_be_booked = 0.0
+	# 	gl_entries = []
+
+	# 	self.make_supplier_gl_entry(gl_entries)
+	# 	self.make_item_gl_entries(gl_entries)
+	# 	#self.make_precision_loss_gl_entry(gl_entries)
+
+	# 	self.make_tax_gl_entries(gl_entries)
+	# 	self.make_internal_transfer_gl_entries(gl_entries)
+	# 	self.make_gl_entries_for_tax_withholding(gl_entries)
+
+	# 	gl_entries = make_regional_gl_entries(gl_entries, self)
+
+	# 	gl_entries = merge_similar_entries(gl_entries)
+
+	# 	self.make_payment_gl_entries(gl_entries)
+	# 	self.make_write_off_gl_entry(gl_entries)
+	# 	self.make_gle_for_rounding_adjustment(gl_entries)
+	# 	self.set_transaction_currency_and_rate_in_gl_map(gl_entries)
+	# 	return gl_entries
 	def get_gl_entries(self, warehouse_account=None):
-		self.auto_accounting_for_stock = erpnext.is_perpetual_inventory_enabled(self.company)
+		"""
+		Robust, ERPNext v15-compatible GL entry builder for Debit Note (Purchase Return).
 
-		if self.auto_accounting_for_stock:
-			self.stock_received_but_not_billed = self.get_company_default("stock_received_but_not_billed")
-		else:
-			self.stock_received_but_not_billed = None
+		- Works with Document rows or dict rows for items/taxes.
+		- Computes totals from base_amount or qty * base_rate fallback.
+		- Adds India Compliance GST fields on tax GL entries and supplier/customer metadata.
+		- Ensures required GL metadata (company, posting_date, voucher_type, voucher_no, fiscal_year).
+		- Returns list of frappe._dict objects ready for make_gl_entries.
+		"""
+		import frappe
+		from frappe.utils import flt, nowdate
 
-		self.negative_expense_to_be_booked = 0.0
+		def get_val(row, field, default=None):
+			"""Return attribute-like value from Document or dict safely."""
+			if row is None:
+				return default
+			try:
+				val = getattr(row, field)
+				return val if val is not None else default
+			except Exception:
+				pass
+			try:
+				if isinstance(row, dict):
+					return row.get(field, default)
+			except Exception:
+				pass
+			return default
+
 		gl_entries = []
 
-		self.make_supplier_gl_entry(gl_entries)
-		self.make_item_gl_entries(gl_entries)
-		#self.make_precision_loss_gl_entry(gl_entries)
+		# Helper: Resolve tax amount safely (base first, fallback to tax_amount)
+		def get_tax_amount(tax_row):
+			amt = flt(get_val(tax_row, "base_tax_amount", 0))
+			if flt(amt) == 0:
+				amt = flt(get_val(tax_row, "tax_amount", 0))
+			return flt(amt)
 
-		self.make_tax_gl_entries(gl_entries)
-		self.make_internal_transfer_gl_entries(gl_entries)
-		self.make_gl_entries_for_tax_withholding(gl_entries)
+		# ------------------------------------------
+		# 1) ITEM REVERSAL (CREDIT expense/stock Account)
+		# For Purchase Return (Debit Note) we need to CREDIT the expense/stock/inventory accounts
+		# ------------------------------------------
+		total_item_amount = flt(0.0)
+		for item in getattr(self, "items", []) or []:
+			base_amount = flt(get_val(item, "base_amount", 0))
+			if not base_amount:
+				qty = flt(get_val(item, "qty", 0))
+				base_rate = flt(get_val(item, "base_rate", get_val(item, "rate", 0)))
+				base_amount = qty * base_rate
+			total_item_amount += base_amount
 
-		gl_entries = make_regional_gl_entries(gl_entries, self)
+		if total_item_amount:
+			# Determine expense/stock account (prefer item-level expense_account or expense_account if configured)
+			expense_account = None
+			if getattr(self, "items", None):
+				first_item = self.items[0]
+				expense_account = get_val(first_item, "expense_account", None) or get_val(first_item, "expense_account", None)
 
-		gl_entries = merge_similar_entries(gl_entries)
+			if not expense_account:
+				# fallback: Company default expense account (try relevant company default)
+				expense_account = frappe.db.get_value("Company", self.company, "default_expense_account")
 
-		self.make_payment_gl_entries(gl_entries)
-		self.make_write_off_gl_entry(gl_entries)
-		self.make_gle_for_rounding_adjustment(gl_entries)
-		self.set_transaction_currency_and_rate_in_gl_map(gl_entries)
-		return gl_entries
+			if not expense_account:
+				# last resort: try to use against_income_account as a fallback (rare)
+				expense_account = get_val(self, "against_expense_account", None)
+
+			if not expense_account:
+				frappe.throw(_("No Expense/Stock Account found for Debit Note {0}").format(self.name))
+
+			cost_center_for_items = None
+			if getattr(self, "items", None) and get_val(self.items[0], "cost_center", None):
+				cost_center_for_items = get_val(self.items[0], "cost_center", None)
+			elif get_val(self, "cost_center", None):
+				cost_center_for_items = get_val(self, "cost_center", None)
+
+			gl_entries.append({
+				"account": expense_account,
+				"debit": 0.0,
+				"credit": flt(total_item_amount),
+				"party_type": None,
+				"party": None,
+				"against_voucher_type": getattr(self, "return_against_doctype", None) or get_val(self, "return_against_doctype", None),
+				"against_voucher": getattr(self, "return_against", None) or get_val(self, "return_against", None),
+				"remarks": _("Expense Reversal for Debit Note {0}").format(self.name),
+				"cost_center": cost_center_for_items,
+				"project": get_val(self, "project", None),
+			})
+
+		# ------------------------------------------
+		# 2) TAX REVERSAL (CREDIT Tax / Input GST Accounts)
+		# Reverse the input tax: tax accounts should be CREDITed for a Purchase Return
+		# ------------------------------------------
+		total_tax_amount = flt(0.0)
+		for tax in getattr(self, "taxes", []) or []:
+			amt = get_tax_amount(tax)
+			if abs(amt) == 0:
+				continue
+
+			total_tax_amount += amt
+			tax_account = get_val(tax, "account_head", None) or get_val(tax, "account", None)
+			if not tax_account:
+				frappe.throw(_("Tax row {0} is missing account head").format(get_val(tax, "description", get_val(tax, "charge_type", "Tax"))))
+
+			# Prepare GST fields required by india_compliance (safe retrieval)
+			company_gstin_val = get_val(self, "custom_company_gstin") or get_val(self, "company_gstin") or frappe.db.get_value("Company", self.company, "gstin")
+			supplier_gstin_val = get_val(self, "custom_supplier_gstin") or get_val(self, "supplier_gstin") or get_val(self, "supplier_address_gstin")
+			place_of_supply_val = get_val(self, "place_of_supply")
+			billing_address_gstin_val = get_val(self, "billing_address_gstin")
+			gst_category_val = get_val(self, "custom_gst_category") or get_val(self, "gst_category")
+			reverse_charge_val = get_val(self, "reverse_charge", 0)
+			invoice_type_val = get_val(self, "invoice_type")
+
+			gl_entries.append({
+				"account": tax_account,
+				"debit": 0.0,
+				"credit": flt(amt),
+				"remarks": _("Tax Reversal ({0}) for Debit Note {1}").format(
+					get_val(tax, "description", get_val(tax, "charge_type", None)), self.name
+				),
+				"cost_center": get_val(tax, "cost_center", None),
+
+				# GST metadata for india_compliance
+				"company_gstin": company_gstin_val,
+				"party_gstin": supplier_gstin_val,
+				"place_of_supply": place_of_supply_val,
+				"billing_address_gstin": billing_address_gstin_val,
+				"gst_category": gst_category_val,
+				"reverse_charge": reverse_charge_val,
+				"invoice_type": invoice_type_val,
+			})
+
+		# ------------------------------------------
+		# 3) ROUND-OFF ADJUSTMENT
+		# ------------------------------------------
+		expected_total = flt(total_item_amount) + flt(total_tax_amount)
+		actual_total = flt(get_val(self, "base_rounded_total") or get_val(self, "base_grand_total") or get_val(self, "grand_total") or 0)
+		round_difference = flt(expected_total - actual_total)
+
+		if abs(round_difference) > 0.0001:
+			round_off_account = get_val(self, "round_off_account") or frappe.db.get_value("Company", self.company, "round_off_account")
+			if not round_off_account:
+				round_off_account = frappe.db.get_value("Account", {"account_name": "Round Off", "company": self.company}, "name")
+
+			if not round_off_account:
+				frappe.throw(_("Round Off Account is required but not found in Company."))
+
+			if round_difference > 0:
+				# expected > actual -> we need to DEBIT round_off (to increase total) => for DN this becomes debit
+				gl_entries.append({
+					"account": round_off_account,
+					"debit": flt(round_difference),
+					"credit": 0.0,
+					"remarks": _("Round Off Adjustment (Debit) for {0}").format(self.name),
+				})
+			else:
+				gl_entries.append({
+					"account": round_off_account,
+					"debit": 0.0,
+					"credit": flt(abs(round_difference)),
+					"remarks": _("Round Off Adjustment (Credit) for {0}").format(self.name),
+				})
+
+		# ------------------------------------------
+		# 4) SUPPLIER COUNTER ENTRY (DEBIT Grand Total)
+		# For Debit Note (purchase return), supplier must be DEBITED (reduce payable)
+		# ------------------------------------------
+		grand_total = flt(get_val(self, "base_rounded_total") or get_val(self, "base_grand_total") or get_val(self, "grand_total") or 0)
+
+		supplier_account = get_val(self, "credit_to") \
+			or frappe.db.get_value("Party Account", {"party": self.supplier, "party_type": "Supplier", "company": self.company}, "default_account") \
+			or frappe.db.get_value("Company", self.company, "default_payable_account")
+
+		if not supplier_account:
+			frappe.throw(_("Supplier Payable Account is required."))
+
+		gl_entries.append({
+			"account": supplier_account,
+			"debit": flt(grand_total),
+			"credit": 0.0,
+			"party_type": "Supplier",
+			"party": self.supplier,
+			"remarks": _("Supplier Debit for Debit Note {0}").format(self.name),
+		})
+
+		# ------------------------------------------
+		# Ensure required ERPNext GL fields are present on each entry
+		# and convert to frappe._dict (object-like) which ERPNext expects
+		# ------------------------------------------
+		fiscal_year = frappe.defaults.get_global_default("fiscal_year")
+		posting_date = get_val(self, "posting_date") or nowdate()
+
+		normalized = []
+		for e in gl_entries:
+			# ensure mandatory fields exist
+			e.setdefault("company", self.company)
+			e.setdefault("posting_date", posting_date)
+			e.setdefault("voucher_type", self.doctype)
+			e.setdefault("voucher_no", self.name)
+			e.setdefault("fiscal_year", fiscal_year)
+
+			# account currency (optional)
+			try:
+				e.setdefault("account_currency", frappe.db.get_value("Account", e.get("account"), "account_currency"))
+			except Exception:
+				e.setdefault("account_currency", None)
+
+			# party fields safe
+			e.setdefault("party_type", e.get("party_type"))
+			e.setdefault("party", e.get("party"))
+
+			# convert numeric fields to proper floats
+			e["debit"] = flt(e.get("debit", 0.0))
+			e["credit"] = flt(e.get("credit", 0.0))
+
+			# final check: ensure account is present
+			if not e.get("account"):
+				frappe.throw(_("GL Entry generated without account: {0}").format(frappe.as_json(e)))
+
+			normalized.append(frappe._dict(e))
+
+		# DEBUG LOG (inspect in Error Log)
+		frappe.log_error(frappe.as_json(normalized), "GL_ENTRIES_GENERATED_FOR_DEBIT_NOTE_{0}".format(self.name))
+
+		return normalized
+
 
 	def check_asset_cwip_enabled(self):
 		# Check if there exists any item with cwip accounting enabled in it's asset category
@@ -713,7 +938,28 @@ class DebitNote(BuyingController):
 					return 1
 		return 0
 
+	# def make_supplier_gl_entry(self, gl_entries):
+	# 	grand_total = (
+	# 		self.rounded_total if (self.rounding_adjustment and self.rounded_total) else self.grand_total
+	# 	)
+	# 	base_grand_total = flt(
+	# 		self.base_rounded_total
+	# 		if (self.base_rounding_adjustment and self.base_rounded_total)
+	# 		else self.base_grand_total,
+	# 		self.precision("base_grand_total"),
+	# 	)
+
+	# 	if grand_total and not self.is_internal_transfer():
+	# 		self.add_supplier_gl_entry(gl_entries, base_grand_total, grand_total)
 	def make_supplier_gl_entry(self, gl_entries):
+		"""
+		Create supplier payable/receivable GL entry for Debit Note.
+
+		Purchase Invoice normally CREDITS supplier (increase payable).
+		Debit Note (purchase return) should DEBIT supplier (decrease payable).
+		"""
+
+		# compute grand totals (use rounded logic if present)
 		grand_total = (
 			self.rounded_total if (self.rounding_adjustment and self.rounded_total) else self.grand_total
 		)
@@ -725,7 +971,53 @@ class DebitNote(BuyingController):
 		)
 
 		if grand_total and not self.is_internal_transfer():
-			self.add_supplier_gl_entry(gl_entries, base_grand_total, grand_total)
+			# determine the party account and currency-aware amounts using get_gl_dict,
+			# keeping the sign rules for Debit Note:
+			# -> debit = base_grand_total (we decrease supplier liability)
+			# -> credit = 0
+
+			# find against_voucher: for return, if update_outstanding_for_self false and is_return with return_against set, use return_against
+			against_voucher = self.name
+			if self.is_return and self.return_against and not self.update_outstanding_for_self:
+				against_voucher = self.return_against
+
+			# currency-aware values: if party_account_currency == company_currency, debit_acc = base_grand_total else debit_acc uses grand_total
+			if getattr(self, "party_account_currency", None) == getattr(self, "company_currency", None):
+				debit_acc = base_grand_total
+				debit_in_trans = grand_total
+			else:
+				debit_acc = base_grand_total
+				debit_in_trans = grand_total
+
+			# Build GL entry for Supplier (DEBIT for Debit Note)
+			gl_entries.append(
+				self.get_gl_dict(
+					{
+						"account": self.credit_to or frappe.db.get_value("Party Account", {"party": self.supplier, "party_type": "Supplier", "company": self.company}, "default_account"),
+						"party_type": "Supplier",
+						"party": self.supplier,
+						"due_date": self.due_date,
+						"against": self.against_expense_account or None,
+
+						"debit": flt(base_grand_total),
+						"credit": 0,
+
+						"debit_in_account_currency": debit_acc,
+						"credit_in_account_currency": 0,
+
+						"debit_in_transaction_currency": debit_in_trans,
+						"credit_in_transaction_currency": 0,
+
+						"against_voucher": against_voucher,
+						"against_voucher_type": self.doctype,
+						"cost_center": self.cost_center,
+						"project": self.project,
+					},
+					getattr(self, "party_account_currency", None),
+					item=self,
+				)
+			)
+
 
 	def add_supplier_gl_entry(
 		self, gl_entries, base_grand_total, grand_total, against_account=None, remarks=None, skip_merge=False
