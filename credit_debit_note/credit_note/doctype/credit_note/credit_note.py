@@ -85,6 +85,8 @@ class CreditNote(SellingController):
 
 	def validate(self):
 		self.validate_auto_set_posting_time()
+		self.is_selling = True
+		self._normalize_tax_rows()
 		super().validate()
 
 		if not self.is_pos:
@@ -170,6 +172,15 @@ class CreditNote(SellingController):
 		self.validate_write_off_account()
 		self.validate_account_for_change_amount()
 		self.validate_income_account()
+	
+	def _normalize_tax_rows(self):
+		for tax in self.get("taxes", []):
+        	# REQUIRED in ERPNext v15+
+			if not getattr(tax, "category", None):
+				tax.category = "Total"
+
+			if not getattr(tax, "add_deduct_tax", None):
+				tax.add_deduct_tax = "Add"
 
 	def validate_for_repost(self):
 		self.validate_write_off_account()
@@ -1297,7 +1308,8 @@ class CreditNote(SellingController):
 			return default
 
 		# collect doc-level GST metadata (safe lookups)
-		company_gstin_doc = get_val(self, "company_gstin") or frappe.db.get_value("Company", self.company, "gstin")
+		# company_gstin_doc = get_val(self, "company_gstin") or frappe.db.get_value("Company", self.company, "gstin")
+		company_gstin_doc = get_company_gstin_safe(self.company)
 		place_of_supply_doc = get_val(self, "place_of_supply")
 		billing_address_gstin_doc = get_val(self, "billing_address_gstin")
 		shipping_address_gstin_doc = get_val(self, "shipping_address_gstin")
@@ -2506,7 +2518,7 @@ def make_delivery_note(source_name, target_doc=None):
 				"postprocess": update_item,
 				"condition": lambda doc: doc.delivered_by_supplier != 1,
 			},
-			"Sales Taxes and Charges": {"doctype": "Credit Note Taxes and Charges", "reset_value": True},
+			"Sales Taxes and Charges": {"doctype": "Sales Taxes and Charges", "reset_value": True},
 			"Sales Team": {
 				"doctype": "Sales Team",
 				"field_map": {"incentives": "incentives"},
@@ -3191,3 +3203,42 @@ def check_if_return_invoice_linked_with_payment_entry(self):
 			message += _("to unallocate the amount of this Return Invoice before cancelling it.")
 			frappe.throw(message)
 
+
+def get_company_gstin_safe(company):
+    """
+    Universal GSTIN resolver for ERPNext.
+    Works with:
+    - Non-GST sites (Company.tax_id)
+    - GST sites (Address.gstin)
+    - India Compliance enabled/disabled
+    """
+
+    # 1️⃣ Try Company.tax_id (non-GST / legacy setups)
+    if frappe.db.has_column("Company", "tax_id"):
+        gstin = frappe.db.get_value("Company", company, "tax_id")
+        if gstin:
+            return gstin
+
+    # 2️⃣ Try Address.gstin (GST / India Compliance)
+    if frappe.db.has_column("Address", "gstin"):
+        gstin = frappe.db.get_value(
+            "Address",
+            {
+                "is_your_company_address": 1,
+                "link_doctype": "Company",
+                "link_name": company
+            },
+            "gstin"
+        )
+        if gstin:
+            return gstin
+
+        # fallback to any linked address
+        return frappe.db.get_value(
+            "Address",
+            {"link_doctype": "Company", "link_name": company},
+            "gstin"
+        )
+
+    # 3️⃣ No GST configured
+    return None

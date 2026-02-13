@@ -70,10 +70,10 @@
    "description": "* Will be calculated in the transaction.",
    "fieldname": "taxes",
    "fieldtype": "Table",
-   "label": "Sales Taxes and Charges",
+   "label": "Credit Note Taxes and Charges",
    "oldfieldname": "other_charges",
    "oldfieldtype": "Table",
-   "options": "Sales Taxes and Charges"
+   "options": "Credit Note Taxes and Charges"
   }
  ],
  "icon": "fa fa-money",

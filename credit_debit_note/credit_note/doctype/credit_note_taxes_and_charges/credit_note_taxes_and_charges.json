@@ -30,10 +30,7 @@
   "base_total",
   "base_tax_amount_after_discount_amount",
   "item_wise_tax_detail",
-  "dont_recompute_tax",
-  "category",
-  "add_deduct_tax",
-  "gst_tax_type"
+  "dont_recompute_tax"
  ],
  "fields": [
   {
@@ -42,27 +39,18 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Type",
+   "oldfieldname": "charge_type",
+   "oldfieldtype": "Select",
    "options": "\nActual\nOn Net Total\nOn Previous Row Amount\nOn Previous Row Total\nOn Item Quantity",
    "reqd": 1
-  },
-  {
-   "fieldname": "category",
-   "fieldtype": "Select",
-   "label": "Category",
-   "options": "\nTotal\nValuation\nValuation and Total"
-  },
-  {
-   "default": "Add",
-   "fieldname": "add_deduct_tax",
-   "fieldtype": "Select",
-   "label": "Add/Deduct",
-   "options": "\nAdd\nDeduct"
   },
   {
    "depends_on": "eval:[\"On Previous Row Amount\", \"On Previous Row Total\"].indexOf(doc.charge_type)!==-1",
    "fieldname": "row_id",
    "fieldtype": "Data",
-   "label": "Reference Row #"
+   "label": "Reference Row #",
+   "oldfieldname": "row_id",
+   "oldfieldtype": "Data"
   },
   {
    "allow_on_submit": 1,
@@ -71,41 +59,11 @@
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Account Head",
+   "oldfieldname": "account_head",
+   "oldfieldtype": "Link",
    "options": "Account",
    "reqd": 1,
    "search_index": 1
-  },
-  {
-   "fieldname": "col_break_1",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "description",
-   "fieldtype": "Small Text",
-   "label": "Description",
-   "print_width": "300px",
-   "reqd": 1
-  },
-  {
-   "default": "0",
-   "description": "If checked, the tax amount will be considered as already included in the Print Rate / Print Amount",
-   "fieldname": "included_in_print_rate",
-   "fieldtype": "Check",
-   "label": "Is this Tax included in Basic Rate?",
-   "print_hide": 1
-  },
-  {
-   "default": "0",
-   "depends_on": "eval:['Sales Taxes and Charges Template', 'Payment Entry'].includes(parent.doctype)",
-   "description": "If checked, the tax amount will be considered as already included in the Paid Amount in Payment Entry",
-   "fieldname": "included_in_paid_amount",
-   "fieldtype": "Check",
-   "label": "Considered In Paid Amount"
-  },
-  {
-   "fieldname": "accounting_dimensions_section",
-   "fieldtype": "Section Break",
-   "label": "Accounting Dimensions"
   },
   {
    "allow_on_submit": 1,
@@ -113,18 +71,35 @@
    "fieldname": "cost_center",
    "fieldtype": "Link",
    "label": "Cost Center",
+   "oldfieldname": "cost_center_other_charges",
+   "oldfieldtype": "Link",
    "options": "Cost Center"
   },
   {
-   "fieldname": "dimension_col_break",
-   "fieldtype": "Column Break"
+   "fieldname": "col_break_1",
+   "fieldtype": "Column Break",
+   "width": "50%"
   },
   {
-   "allow_on_submit": 1,
-   "fieldname": "project",
-   "fieldtype": "Link",
-   "label": "Project",
-   "options": "Project"
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description",
+   "oldfieldname": "description",
+   "oldfieldtype": "Small Text",
+   "print_width": "300px",
+   "reqd": 1,
+   "width": "300px"
+  },
+  {
+   "default": "0",
+   "description": "If checked, the tax amount will be considered as already included in the Print Rate / Print Amount",
+   "fieldname": "included_in_print_rate",
+   "fieldtype": "Check",
+   "label": "Is this Tax included in Basic Rate?",
+   "print_hide": 1,
+   "print_width": "150px",
+   "report_hide": 1,
+   "width": "150px"
   },
   {
    "fieldname": "section_break_8",
@@ -135,19 +110,13 @@
    "fieldname": "rate",
    "fieldtype": "Float",
    "in_list_view": 1,
-   "label": "Tax Rate"
+   "label": "Tax Rate",
+   "oldfieldname": "rate",
+   "oldfieldtype": "Currency"
   },
   {
    "fieldname": "section_break_9",
    "fieldtype": "Section Break"
-  },
-  {
-   "fetch_from": "account_head.account_currency",
-   "fieldname": "account_currency",
-   "fieldtype": "Link",
-   "label": "Account Currency",
-   "options": "Currency",
-   "read_only": 1
   },
   {
    "columns": 2,
@@ -181,6 +150,8 @@
    "fieldname": "base_tax_amount",
    "fieldtype": "Currency",
    "label": "Amount (Company Currency)",
+   "oldfieldname": "tax_amount",
+   "oldfieldtype": "Currency",
    "options": "Company:company:default_currency",
    "read_only": 1
   },
@@ -188,6 +159,8 @@
    "fieldname": "base_total",
    "fieldtype": "Currency",
    "label": "Total (Company Currency)",
+   "oldfieldname": "total",
+   "oldfieldtype": "Currency",
    "options": "Company:company:default_currency",
    "read_only": 1
   },
@@ -195,21 +168,42 @@
    "depends_on": "eval:parent.discount_amount",
    "fieldname": "base_tax_amount_after_discount_amount",
    "fieldtype": "Currency",
-   "label": "Tax Amount After Discount (Company Currency)",
+   "label": "Tax Amount After Discount Amount (Company Currency)",
    "options": "Company:company:default_currency",
    "read_only": 1
-  },
-  {
-   "fieldname": "gst_tax_type",
-   "fieldtype": "Data",
-   "label": "GST Tax Type"
   },
   {
    "fieldname": "item_wise_tax_detail",
    "fieldtype": "Code",
    "hidden": 1,
    "label": "Item Wise Tax Detail",
+   "oldfieldname": "item_wise_tax_detail",
+   "oldfieldtype": "Small Text",
    "read_only": 1
+  },
+  {
+   "fieldname": "accounting_dimensions_section",
+   "fieldtype": "Section Break",
+   "label": "Accounting Dimensions"
+  },
+  {
+   "fieldname": "dimension_col_break",
+   "fieldtype": "Column Break"
+  },
+  {
+    "allow_on_submit": 1,
+    "fieldname": "project",
+    "fieldtype": "Link",
+    "label": "Project",
+    "options": "Project"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:['Sales Taxes and Charges Template', 'Payment Entry'].includes(parent.doctype)",
+   "description": "If checked, the tax amount will be considered as already included in the Paid Amount in Payment Entry",
+   "fieldname": "included_in_paid_amount",
+   "fieldtype": "Check",
+   "label": "Considered In Paid Amount"
   },
   {
    "default": "0",
@@ -218,6 +212,14 @@
    "hidden": 1,
    "label": "Dont Recompute tax",
    "print_hide": 1,
+   "read_only": 1
+  },
+  {
+   "fetch_from": "account_head.account_currency",
+   "fieldname": "account_currency",
+   "fieldtype": "Link",
+   "label": "Account Currency",
+   "options": "Currency",
    "read_only": 1
   }
  ],
