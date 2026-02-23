@@ -3205,40 +3205,27 @@ def check_if_return_invoice_linked_with_payment_entry(self):
 
 
 def get_company_gstin_safe(company):
-    """
-    Universal GSTIN resolver for ERPNext.
-    Works with:
-    - Non-GST sites (Company.tax_id)
-    - GST sites (Address.gstin)
-    - India Compliance enabled/disabled
-    """
 
-    # 1️⃣ Try Company.tax_id (non-GST / legacy setups)
+    # 1️⃣ Try Company.tax_id
     if frappe.db.has_column("Company", "tax_id"):
         gstin = frappe.db.get_value("Company", company, "tax_id")
         if gstin:
             return gstin
 
-    # 2️⃣ Try Address.gstin (GST / India Compliance)
+    # 2️⃣ Try Address.gstin properly via Dynamic Link
     if frappe.db.has_column("Address", "gstin"):
-        gstin = frappe.db.get_value(
-            "Address",
+
+        address = frappe.db.get_value(
+            "Dynamic Link",
             {
-                "is_your_company_address": 1,
                 "link_doctype": "Company",
-                "link_name": company
+                "link_name": company,
+                "parenttype": "Address"
             },
-            "gstin"
-        )
-        if gstin:
-            return gstin
-
-        # fallback to any linked address
-        return frappe.db.get_value(
-            "Address",
-            {"link_doctype": "Company", "link_name": company},
-            "gstin"
+            "parent"
         )
 
-    # 3️⃣ No GST configured
+        if address:
+            return frappe.db.get_value("Address", address, "gstin")
+
     return None
